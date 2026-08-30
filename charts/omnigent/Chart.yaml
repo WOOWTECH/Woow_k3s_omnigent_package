@@ -1,0 +1,32 @@
+apiVersion: v2
+name: omnigent
+description: |
+  Omnigent 0.11.0 meta-harness on rootless k3s.
+
+  Three deployments: postgres (StatefulSet), the upstream omnigent-server, and
+  N runner replicas each holding their own pi-agent state. Cloudflared sidecar
+  fronts the web UI with a real Let's Encrypt cert.
+
+  Sibling of Woow_podman_omnigent_package — same runner image, same auto-claim
+  admin flow, same pi harness bundling. The podman sibling mounts a shared
+  pi-agent-data volume; here we default to fresh per-runner Longhorn PVCs
+  because pi-agent's PVCs are RWO and can't be co-mounted with the live
+  pi-agent pods.
+type: application
+version: 0.1.0
+appVersion: "0.11.0"
+kubeVersion: ">=1.29.0-0"
+home: https://github.com/WOOWTECH/Woow_k3s_omnigent_package
+sources:
+  - https://github.com/WOOWTECH/Woow_k3s_omnigent_package
+  - https://github.com/WOOWTECH/Woow_podman_omnigent_package
+  - https://github.com/omnigent-ai/omnigent
+maintainers:
+  - name: WOOWTECH
+    email: woowtech@designsmart.com.tw
+keywords:
+  - omnigent
+  - pi-coding-agent
+  - k3s
+  - cloudflared
+  - agent-harness

@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: omnigent-server-data
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  accessModes: {{ .Values.server.storage.accessModes | toJson }}
+  storageClassName: {{ .Values.server.storage.storageClassName | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.server.storage.size | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigent-server
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  strategy:
+    # Recreate — server holds a listening socket on the shared PVC path and
+    # rolling would attach the new pod before the old released. Longhorn RWO
+    # blocks that. Same call for the runners below.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigent.name" . }}
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        {{- include "omnigent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+    spec:
+      containers:
+        - name: server
+          image: {{ .Values.server.image | quote }}
+          imagePullPolicy: {{ .Values.server.imagePullPolicy | quote }}
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8000"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: omnigent-postgres
+                  key: DATABASE_URL
+            - name: OMNIGENT_AUTH_ENABLED
+              value: {{ if .Values.server.authEnabled }}"1"{{ else }}"0"{{ end }}
+            - name: OMNIGENT_ACCOUNTS_BASE_URL
+              value: {{ .Values.server.baseUrl | quote }}
+            - name: ARTIFACT_DIR
+              value: /data/artifacts
+            - name: OMNIGENT_ADMIN_CREDENTIALS_PATH
+              value: /data/admin-credentials
+            {{- if .Values.server.features }}
+            - name: OMNIGENT_FEATURES
+              value: {{ .Values.server.features | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+          # Never probe /healthz — it's shadowed by the React SPA catch-all
+          # and returns HTML 200 even when FastAPI is dead. /health returns
+          # {"status":"ok"} JSON only when the API is up.
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.server.healthPath | quote }}
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.server.healthPath | quote }}
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: server-data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+      volumes:
+        - name: server-data
+          persistentVolumeClaim:
+            claimName: omnigent-server-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: omnigent-server
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: {{ include "omnigent.name" . }}
+    app.kubernetes.io/component: server

@@ -1,0 +1,47 @@
+name: chart
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'charts/**'
+      - '.github/workflows/chart.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'charts/**'
+  workflow_dispatch: {}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: helm lint
+        run: helm lint charts/omnigent
+
+      - name: helm template (default values)
+        run: helm template omnigent charts/omnigent -f charts/omnigent/values.yaml > /tmp/rendered.yaml
+
+      - name: helm template (with woow overlay)
+        run: helm template omnigent charts/omnigent -f charts/omnigent/values.yaml -f charts/omnigent/values-woow.yaml > /tmp/rendered-woow.yaml
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          kubeconform -v
+
+      - name: kubeconform (schema validation)
+        # skip = CustomResource; strict = require kind+apiVersion; verbose = summary
+        run: |
+          for f in /tmp/rendered.yaml /tmp/rendered-woow.yaml; do
+            echo "== $f =="
+            kubeconform -strict -summary -kubernetes-version 1.29.0 "$f"
+          done

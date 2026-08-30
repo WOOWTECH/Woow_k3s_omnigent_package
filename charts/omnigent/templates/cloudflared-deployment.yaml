@@ -1,0 +1,64 @@
+{{- if .Values.cloudflared.enabled -}}
+{{- /*
+Cloudflared sidecar Deployment — terminates a public HTTPS endpoint at CF edge
+and tunnels traffic to omnigent-server. The tunnel is cloudflare-managed
+(ingress rules live in CF, not in a local yaml), so we only need credentials
+here. Rules are seeded once via `scripts/apply.sh` (or the CF dashboard).
+
+Two replicas so a single pod eviction doesn't drop the public URL.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: omnigent-cloudflared
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cloudflared
+spec:
+  replicas: {{ .Values.cloudflared.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "omnigent.name" . }}
+      app.kubernetes.io/component: cloudflared
+  template:
+    metadata:
+      labels:
+        {{- include "omnigent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: cloudflared
+    spec:
+      containers:
+        - name: cloudflared
+          image: {{ .Values.cloudflared.image | quote }}
+          args:
+            - tunnel
+            - --no-autoupdate
+            - --config
+            - /etc/cloudflared/config.yaml
+            - run
+          volumeMounts:
+            - name: creds
+              mountPath: /etc/cloudflared
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              # cloudflared exposes a metrics endpoint on 2000 by default.
+              path: /ready
+              port: 2000
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.cloudflared.resources | nindent 12 }}
+      volumes:
+        - name: creds
+          projected:
+            sources:
+              - secret:
+                  name: {{ .Values.cloudflared.existingCredentialsSecret | quote }}
+                  items:
+                    - key: credentials.json
+                      path: credentials.json
+                    - key: config.yaml
+                      path: config.yaml
+{{- end }}

@@ -1,0 +1,13 @@
+# Never commit tunnel credentials or provider keys.
+*.tunnel-creds.json
+*.env
+*.secret.yaml
+.env
+.env.*
+
+# Helm working dirs
+charts/*/charts/
+charts/*/*.tgz
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/

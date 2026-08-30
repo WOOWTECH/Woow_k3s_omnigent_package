@@ -1,0 +1,80 @@
+{{- if .Values.setupAdmin.enabled -}}
+{{- /*
+Post-install / post-upgrade hook: waits for the server to serve /health, then
+POSTs the admin creds to /auth/setup. Idempotent — returns 409 on subsequent
+runs and we treat that as success.
+
+Mirrors the podman sibling's auto-claim block in scripts/install.sh.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: omnigent-setup-admin-{{ .Release.Revision }}
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: setup-admin
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 4
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        {{- include "omnigent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: setup-admin
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: setup
+          image: {{ .Values.setupAdmin.image | quote }}
+          env:
+            - name: OMNIGENT_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: omnigent-admin
+                  key: OMNIGENT_ADMIN_USERNAME
+            - name: OMNIGENT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: omnigent-admin
+                  key: OMNIGENT_ADMIN_PASSWORD
+          command: [/bin/sh, -c]
+          args:
+            - |
+              set -eu
+              echo "[setup-admin] waiting for omnigent-server /health"
+              i=0
+              until curl -sSf --max-time 3 http://omnigent-server:8000/health >/dev/null 2>&1; do
+                i=$((i+1))
+                if [ "$i" -ge 60 ]; then
+                  echo "[setup-admin] server /health not answering after 5 min — giving up"
+                  exit 1
+                fi
+                sleep 5
+              done
+              echo "[setup-admin] server up"
+
+              echo "[setup-admin] checking needs_setup"
+              INFO=$(curl -sS --max-time 5 http://omnigent-server:8000/v1/info || echo '{}')
+              NEEDS=$(echo "$INFO" | sed -n 's/.*"needs_setup":\([^,}]*\).*/\1/p' | tr -d ' ')
+              echo "[setup-admin] needs_setup=$NEEDS"
+              if [ "$NEEDS" != "true" ]; then
+                echo "[setup-admin] admin already claimed — no-op"
+                exit 0
+              fi
+
+              echo "[setup-admin] POST /auth/setup as $OMNIGENT_ADMIN_USERNAME"
+              CODE=$(curl -sS -o /tmp/resp -w '%{http_code}' \
+                -X POST -H 'Content-Type: application/json' \
+                --data "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
+                --max-time 10 http://omnigent-server:8000/auth/setup)
+              case "$CODE" in
+                200|201) echo "[setup-admin] admin created" ;;
+                409)     echo "[setup-admin] admin already exists (409) — ok" ;;
+                *)       echo "[setup-admin] /auth/setup returned $CODE:"; cat /tmp/resp; exit 1 ;;
+              esac
+{{- end }}

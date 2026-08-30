@@ -1,0 +1,102 @@
+# Default values for the omnigent chart.
+# Override in values-woow.yaml (in-repo overlay) or via `helm install --set`.
+#
+# Named to match the podman sibling's Environment= lines so anyone reading both
+# repos gets the same mental model.
+
+namespace:
+  # If create=true, the chart renders a Namespace resource. Set false when
+  # `helm install --namespace X --create-namespace` is preferred (usual).
+  create: false
+  name: omnigent
+
+# --- Admin credentials (single source of truth) ------------------------------
+# Both the auto-claim Job (POST /auth/setup) and every runner's login curl
+# read from this Secret. Change these before deploying outside your trust
+# boundary — the chart values file is committed to a public repo.
+admin:
+  username: woow
+  password: woowtech2026
+
+# --- Postgres --------------------------------------------------------------
+postgres:
+  image: docker.io/library/postgres:16-alpine
+  # postgres db password — internal only, never published.
+  # DATABASE_URL is derived: postgresql+psycopg://omnigent:<password>@omnigent-postgres:5432/omnigent
+  password: woowtech
+  storage:
+    size: 20Gi
+    storageClassName: longhorn
+    accessModes: [ReadWriteOnce]
+  resources: {}
+
+# --- omnigent-server -------------------------------------------------------
+server:
+  image: ghcr.io/omnigent-ai/omnigent-server:latest
+  imagePullPolicy: Always
+  # Base URL exposed to browsers — must match the cloudflared ingress hostname.
+  baseUrl: https://omnigent.woowtech.io
+  # OMNIGENT_AUTH_ENABLED=1 = built-in accounts. Keep this on unless the
+  # deployment is behind a trusted-LAN-only auth layer.
+  authEnabled: true
+  # Feature flags forwarded via OMNIGENT_FEATURES=. Empty by default; add
+  # comma-separated flag names to enable page-gated features (e.g. usage_page).
+  features: ""
+  storage:
+    # Persistent /data (admin-credentials file, artifacts). Small — server
+    # rarely writes here.
+    size: 5Gi
+    storageClassName: longhorn
+    accessModes: [ReadWriteOnce]
+  resources: {}
+  # Podman version had this HTTP path issue too — /healthz is shadowed by
+  # the React SPA catch-all and returns HTML 200 even when the API is dead.
+  # /health returns {"status":"ok"} JSON. See docs/plans/2026-08-31-initial-package.md.
+  healthPath: /health
+
+# --- runner ----------------------------------------------------------------
+# One Deployment per entry; each dials into the server, registers a host,
+# and holds its own pi-agent state on a dedicated Longhorn PVC.
+runner:
+  # Published per-arch by Woow_podman_omnigent_package's build.yml workflow.
+  # Tag `main` tracks the latest main-branch build; use `main-<sha>` to pin.
+  # Multi-arch manifest lists aren't built upstream — pick amd64 or arm64.
+  image: ghcr.io/woowtech/woow-omnigent-runner-amd64:main
+  imagePullPolicy: Always
+  # Chart provisions one Deployment per name in `hosts`, plus a matching PVC.
+  # Names surface in the omnigent Web UI host picker exactly as written here.
+  hosts:
+    - name: pi1
+    - name: pi4
+    - name: pi5
+  storage:
+    size: 20Gi
+    storageClassName: longhorn
+    accessModes: [ReadWriteOnce]
+  resources: {}
+  # pi CLI env — mirrors runner quadlet.
+  piTelemetry: "0"
+  piSkipVersionCheck: "1"
+
+# --- setup-admin Job (post-install hook) ------------------------------------
+setupAdmin:
+  enabled: true
+  # curl image used by the Job. Pinned so a network hiccup in registry doesn't
+  # break first-run admin claim.
+  image: docker.io/curlimages/curl:8.10.1
+
+# --- cloudflared sidecar ---------------------------------------------------
+# Terminates `omnigent.woowtech.io` at CF edge and tunnels to the in-cluster
+# omnigent-server service. Uses cloudflare-managed config (ingress rules pushed
+# via the CF API); the tunnel-token itself is in the referenced Secret.
+cloudflared:
+  enabled: true
+  image: docker.io/cloudflare/cloudflared:2026.7.3
+  replicas: 2
+  # Name of the Secret holding the tunnel credentials JSON. Populate it via:
+  #   kubectl create secret generic omnigent-cloudflared-creds \
+  #     --from-file=credentials.json=/tmp/omnigent-tunnel-creds.json \
+  #     -n omnigent
+  # (scripts/apply.sh does this automatically.)
+  existingCredentialsSecret: omnigent-cloudflared-creds
+  resources: {}
