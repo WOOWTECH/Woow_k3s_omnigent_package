@@ -35,19 +35,34 @@ DST_POD=$(kctx -n "${NAMESPACE}" get pod \
 
 echo "==> source: ${SRC_NS}/${SRC_POD} (container pi-web)"
 echo "==> dest:   ${NAMESPACE}/${DST_POD} (runner PVC via /data/pi-agent)"
-echo "==> streaming tar (this preserves ownership + timestamps)…"
+SRC_SIZE=$(kctx -n "${SRC_NS}" exec "${SRC_POD}" -c pi-web -- \
+    du -sb /data/pi-agent 2>/dev/null | awk '{print $1}')
+echo "==> streaming tar of ~$(numfmt --to=iec "${SRC_SIZE}" 2>/dev/null || echo "${SRC_SIZE} bytes"); expect several minutes on a 5-20GB pi-agent volume"
 
 # tar from src → stdout → tar in dst /data/pi-agent
-# Skip volatile subdirs (lost+found, sessions/) to keep the copy small and
-# not stomp on runner-local session ids that omnigent already wrote.
-kctx -n "${SRC_NS}" exec "${SRC_POD}" -c pi-web -- \
-    tar -C /data/pi-agent -cf - \
-        --exclude='./lost+found' \
-        --exclude='./home/.omnigent/logs' \
-        --exclude='./missions/log' \
-        . \
-| kctx -n "${NAMESPACE}" exec -i "${DST_POD}" -c runner -- \
-    tar -C /data/pi-agent -xf -
+# Skip volatile subdirs (lost+found, sessions/, logs) to keep the copy small
+# and not stomp on runner-local session ids that omnigent already wrote.
+if command -v pv >/dev/null 2>&1; then
+    kctx -n "${SRC_NS}" exec "${SRC_POD}" -c pi-web -- \
+        tar -C /data/pi-agent -cf - \
+            --exclude='./lost+found' \
+            --exclude='./home/.omnigent/logs' \
+            --exclude='./missions/log' \
+            . \
+    | pv -s "${SRC_SIZE:-0}" \
+    | kctx -n "${NAMESPACE}" exec -i "${DST_POD}" -c runner -- \
+        tar -C /data/pi-agent -xf -
+else
+    # No pv — silent transfer; progress not visible until done.
+    kctx -n "${SRC_NS}" exec "${SRC_POD}" -c pi-web -- \
+        tar -C /data/pi-agent -cf - \
+            --exclude='./lost+found' \
+            --exclude='./home/.omnigent/logs' \
+            --exclude='./missions/log' \
+            . \
+    | kctx -n "${NAMESPACE}" exec -i "${DST_POD}" -c runner -- \
+        tar -C /data/pi-agent -xf -
+fi
 
 echo "==> restart runner-${DST_HOST} to re-read providers"
 kctx -n "${NAMESPACE}" rollout restart deploy/omnigent-runner-"${DST_HOST}"
