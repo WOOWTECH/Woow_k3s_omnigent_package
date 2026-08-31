@@ -30,6 +30,35 @@ postgres:
     accessModes: [ReadWriteOnce]
   resources: {}
 
+# --- pgbouncer (server-pod sidecar) ----------------------------------------
+# Sits inside the omnigent-server pod on 127.0.0.1:6432 and hands the server a
+# connection pool that survives Postgres restarts. Without it, when the
+# omnigent-postgres StatefulSet pod restarts the server's asyncpg pool holds
+# stale broken sockets and takes ~125s (kubelet has to fail liveness enough
+# times to kill and restart the server pod) to recover — measured in
+# Resilience Test 3 on 2026-08-31. With pgbouncer the server reconnects
+# through the pool front-end and target recovery is <30s.
+#
+# Uses `session` pool mode because omnigent's FastAPI stack relies on asyncpg
+# prepared statements — `transaction` / `statement` modes break those. Sizing
+# defaults are conservative for a single-server + 3-runner deployment; tune
+# per-tenant via values overlay.
+#
+# Toggle: set `enabled: false` to revert to a direct
+# `omnigent-postgres:5432` connection (server DATABASE_URL falls back to the
+# Secret). Useful for A/B comparing pool vs. no-pool behaviour.
+pgbouncer:
+  enabled: true
+  image: docker.io/bitnami/pgbouncer:1.24.0
+  # session | transaction | statement — session is the only safe mode for
+  # asyncpg + prepared statements; the other two are here for reference.
+  poolMode: session
+  maxClientConn: 100
+  defaultPoolSize: 25
+  serverLifetime: 3600
+  serverIdleTimeout: 600
+  resources: {}
+
 # --- omnigent-server -------------------------------------------------------
 server:
   image: ghcr.io/omnigent-ai/omnigent-server:latest
@@ -58,10 +87,15 @@ server:
 # One Deployment per entry; each dials into the server, registers a host,
 # and holds its own pi-agent state on a dedicated Longhorn PVC.
 runner:
-  # Published per-arch by Woow_podman_omnigent_package's build.yml workflow.
-  # Tag `main` tracks the latest main-branch build; use `main-<sha>` to pin.
-  # Multi-arch manifest lists aren't built upstream — pick amd64 or arm64.
-  image: ghcr.io/woowtech/woow-omnigent-runner-amd64:main
+  # Published as a multi-arch manifest list by Woow_podman_omnigent_package's
+  # build.yml workflow — the `manifest` job composes the amd64 + arm64 per-arch
+  # images into a single tag without an arch suffix, so the container runtime
+  # picks the right architecture automatically on each node. No need to pick
+  # amd64 vs arm64 in this file anymore. Tag `main` tracks the latest
+  # main-branch build; use `main-<sha>` to pin. Per-arch tags
+  # (`woow-omnigent-runner-amd64:*` / `-arm64:*`) are still published for
+  # audit / rollback if you need to force a specific architecture.
+  image: ghcr.io/woowtech/woow-omnigent-runner:main
   imagePullPolicy: Always
   # Chart provisions one Deployment per name in `hosts`, plus a matching PVC.
   # Names surface in the omnigent Web UI host picker exactly as written here.
@@ -85,6 +119,23 @@ setupAdmin:
   # break first-run admin claim.
   image: docker.io/curlimages/curl:8.10.1
 
+# --- host-gc CronJob (stale-host cleanup) ----------------------------------
+# Periodic sweep that logs (and, once upstream ships the endpoint, deletes)
+# offline hosts from /v1/hosts. Closes W2-HIGH-3 / K3S-MED-1 from the sibling
+# repos' E2E reports where every runner pod restart leaves an orphan host_id.
+#
+# STATUS 2026-08-31: dry-run-only. Upstream API has GET /v1/hosts and
+# GET /v1/hosts/{host_id} but no DELETE. The CronJob logs offline hosts it
+# would have deleted and exits 0. When the DELETE endpoint lands, flip
+# `dryRun: false` and the same job starts pruning. See
+# templates/host-gc-cronjob.yaml for the full endpoint discovery snapshot.
+hostGc:
+  enabled: true
+  schedule: "0 3 * * *"       # 03:00 UTC daily
+  retentionMinutes: 60        # delete hosts offline > this many minutes
+  image: docker.io/curlimages/curl:8.10.1
+  dryRun: false               # while upstream lacks DELETE the job gracefully no-ops on 405; flip to true to force log-only
+
 # --- cloudflared sidecar ---------------------------------------------------
 # Terminates `omnigent.woowtech.io` at CF edge and tunnels to the in-cluster
 # omnigent-server service. Uses cloudflare-managed config (ingress rules pushed
@@ -93,10 +144,20 @@ cloudflared:
   enabled: true
   image: docker.io/cloudflare/cloudflared:2026.7.3
   replicas: 2
-  # Name of the Secret holding the tunnel credentials JSON. Populate it via:
-  #   kubectl create secret generic omnigent-cloudflared-creds \
-  #     --from-file=credentials.json=/tmp/omnigent-tunnel-creds.json \
-  #     -n omnigent
-  # (scripts/apply.sh does this automatically.)
+  # Name of the Secret cloudflared reads (credentials.json + config.yaml).
+  # Two ways to populate it:
+  #  (a) `scripts/apply.sh install` (git-clone flow) uses `kubectl create secret`
+  #      to mint it from a local JSON file — see scripts/apply.sh.
+  #  (b) OCI helm install (no git clone) — set `credentials:` below to the JSON
+  #      contents; templates/cloudflared-secret.yaml renders the Secret.
+  #      Enables `helm install oci://… --set-file cloudflared.credentials=creds.json`.
   existingCredentialsSecret: omnigent-cloudflared-creds
+  # OCI install: paste JSON `{AccountTag, TunnelID, TunnelSecret}` here or via
+  # `--set-file cloudflared.credentials=creds.json`. When non-empty, the chart
+  # renders the Secret itself (no separate kubectl step). Leave empty to depend
+  # on an operator-managed Secret named by `existingCredentialsSecret`.
+  credentials: ""
+  # Optional: override TunnelID in the rendered config.yaml. Defaults to
+  # `.TunnelID` parsed out of `credentials` JSON via `fromJson`.
+  tunnelId: ""
   resources: {}

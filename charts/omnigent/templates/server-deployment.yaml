@@ -38,6 +38,25 @@ spec:
         {{- include "omnigent.labels" . | nindent 8 }}
         app.kubernetes.io/component: server
     spec:
+      # WHY the pgbouncer sidecar (when .Values.pgbouncer.enabled is true):
+      # ----------------------------------------------------------------------
+      # The omnigent-server holds an asyncpg pool of long-lived Postgres
+      # sockets. When the omnigent-postgres StatefulSet pod restarts, those
+      # sockets become half-closed and asyncpg's internal reconnect only
+      # kicks in after several failed queries. In Resilience Test 3
+      # (2026-08-31) this manifested as **~125s of 5xx responses** on
+      # /health while kubelet failed liveness enough times to kill and
+      # restart the server pod itself — recovery required a full server
+      # restart, not just Postgres coming back.
+      #
+      # pgbouncer sits at 127.0.0.1:6432 inside this pod. It owns the
+      # backend Postgres sockets; when Postgres flaps, pgbouncer reconnects
+      # transparently and the server's pool keeps handing out working
+      # client-side connections. Target recovery: <30s (kubelet doesn't
+      # need to restart the server pod at all).
+      #
+      # Pool mode is `session` because omnigent's SQLAlchemy async engine
+      # relies on prepared statements; `transaction` mode would break them.
       containers:
         - name: server
           image: {{ .Values.server.image | quote }}
@@ -47,11 +66,23 @@ spec:
               value: "0.0.0.0"
             - name: PORT
               value: "8000"
+            {{- if .Values.pgbouncer.enabled }}
+            # Route through the sidecar pgbouncer on localhost. The password
+            # still comes from the same Secret so rotation stays single-source.
+            - name: DATABASE_URL
+              value: "postgresql+psycopg://omnigent:$(POSTGRES_PASSWORD)@127.0.0.1:6432/omnigent"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: omnigent-postgres
+                  key: POSTGRES_PASSWORD
+            {{- else }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: omnigent-postgres
                   key: DATABASE_URL
+            {{- end }}
             - name: OMNIGENT_AUTH_ENABLED
               value: {{ if .Values.server.authEnabled }}"1"{{ else }}"0"{{ end }}
             - name: OMNIGENT_ACCOUNTS_BASE_URL
@@ -88,6 +119,55 @@ spec:
               mountPath: /data
           resources:
             {{- toYaml .Values.server.resources | nindent 12 }}
+        {{- if .Values.pgbouncer.enabled }}
+        - name: pgbouncer
+          image: {{ .Values.pgbouncer.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRESQL_USERNAME
+              value: omnigent
+            - name: POSTGRESQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: omnigent-postgres
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRESQL_HOST
+              value: omnigent-postgres
+            - name: POSTGRESQL_PORT
+              value: "5432"
+            - name: POSTGRESQL_DATABASE
+              value: omnigent
+            - name: PGBOUNCER_DATABASE
+              value: omnigent
+            - name: PGBOUNCER_POOL_MODE
+              value: {{ .Values.pgbouncer.poolMode | quote }}
+            - name: PGBOUNCER_MAX_CLIENT_CONN
+              value: {{ .Values.pgbouncer.maxClientConn | quote }}
+            - name: PGBOUNCER_DEFAULT_POOL_SIZE
+              value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: PGBOUNCER_SERVER_LIFETIME
+              value: {{ .Values.pgbouncer.serverLifetime | quote }}
+            - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
+              value: {{ .Values.pgbouncer.serverIdleTimeout | quote }}
+          ports:
+            # No Service — pgbouncer is pod-local; the server container talks
+            # to it via 127.0.0.1 and no other pod should touch it.
+            - name: pgbouncer
+              containerPort: 6432
+          readinessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -p, "6432", -U, omnigent]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command: [pg_isready, -h, 127.0.0.1, -p, "6432", -U, omnigent]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
+        {{- end }}
       volumes:
         - name: server-data
           persistentVolumeClaim:

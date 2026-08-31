@@ -1,0 +1,32 @@
+{{- if .Values.hostGc.enabled -}}
+{{- /*
+Dedicated ServiceAccount for the host-gc CronJob.
+
+NO Role / RoleBinding is defined here — intentionally.
+
+The host-gc job authenticates to omnigent-server via JWT
+(POST /auth/login using the omnigent-admin Secret) and only talks to the
+omnigent-server HTTP API. It never calls the kube-apiserver, so no Kubernetes
+RBAC verbs are required.
+
+The ServiceAccount exists purely so that if a future audit / policy engine
+(Kyverno, OPA/Gatekeeper, PSA) wants to distinguish "which pod issued this
+network call" it sees `omnigent-host-gc` instead of the shared `default`
+namespace SA. It also lets us apply automountServiceAccountToken: false to
+strip the kube token from the pod, since it isn't used.
+
+If upstream ever gains a delete endpoint AND you decide to gate the CronJob
+on a Kubernetes Lease / ConfigMap-lock instead of `concurrencyPolicy: Forbid`,
+add a Role with `get,list,create,update` on `coordination.k8s.io/leases` and
+bind it here. Not needed for the current spec.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: omnigent-host-gc
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: host-gc
+automountServiceAccountToken: false
+{{- end }}

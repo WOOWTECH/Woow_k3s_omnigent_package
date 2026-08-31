@@ -1,0 +1,200 @@
+{{- if .Values.hostGc.enabled -}}
+{{- /*
+Periodic host GC — closes W2-HIGH-3 / K3S-MED-1 from the sibling repos' E2E
+reports (every runner pod restart leaves an orphan host_id in
+/v1/hosts, so the UI's host picker grows monotonically).
+
+IMPORTANT — dry-run-only as of 2026-08-31.
+Endpoint discovery against the live cluster (omnigent-server 8000 /openapi.json)
+shows the API surface for hosts is READ-ONLY:
+
+    GET  /v1/hosts
+    GET  /v1/hosts/{host_id}
+    POST /v1/hosts/{host_id}/runners
+    POST /v1/hosts/{host_id}/directories
+    POST /v1/hosts/{host_id}/harnesses/{harness}/install
+    POST /v1/hosts/{host_id}/harnesses/{harness}/credential
+    GET  /v1/hosts/{host_id}/worktrees
+    GET  /v1/hosts/{host_id}/filesystem[/{path}]
+    GET  /v1/hosts/{host_id}/credentials/detected
+    GET  /v1/hosts/{host_id}/harnesses/{harness}/model-options
+
+There is NO `DELETE /v1/hosts/{host_id}` (or any DELETE under /v1/hosts).
+So this CronJob currently only *logs* the offline hosts it would have deleted
+and exits 0. Once upstream exposes a delete endpoint, flip .Values.hostGc.dryRun
+to false and the same job will start actually pruning.
+
+RBAC: none needed. This job auths to omnigent-server via JWT (POST /auth/login)
+using the same omnigent-admin Secret as setup-admin-job.yaml. It does NOT talk
+to the kube-apiserver, so no ServiceAccount/Role is required — the default
+namespace ServiceAccount is fine.
+*/ -}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: omnigent-host-gc
+  namespace: {{ include "omnigent.namespace" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: host-gc
+spec:
+  schedule: {{ .Values.hostGc.schedule | quote }}
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 300
+  jobTemplate:
+    metadata:
+      labels:
+        {{- include "omnigent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: host-gc
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      template:
+        metadata:
+          labels:
+            {{- include "omnigent.labels" . | nindent 12 }}
+            app.kubernetes.io/component: host-gc
+        spec:
+          restartPolicy: Never
+          serviceAccountName: omnigent-host-gc
+          automountServiceAccountToken: false
+          containers:
+            - name: host-gc
+              image: {{ .Values.hostGc.image | quote }}
+              env:
+                - name: OMNIGENT_ADMIN_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: omnigent-admin
+                      key: OMNIGENT_ADMIN_USERNAME
+                - name: OMNIGENT_ADMIN_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: omnigent-admin
+                      key: OMNIGENT_ADMIN_PASSWORD
+                - name: RETENTION_MINUTES
+                  value: {{ .Values.hostGc.retentionMinutes | quote }}
+                - name: DRY_RUN
+                  value: {{ .Values.hostGc.dryRun | quote }}
+              command: [/bin/sh, -c]
+              args:
+                - |
+                  set -eu
+                  SERVER=http://omnigent-server:8000
+
+                  echo "[host-gc] retention=${RETENTION_MINUTES}m dry_run=${DRY_RUN}"
+
+                  echo "[host-gc] waiting for ${SERVER}/health"
+                  i=0
+                  until curl -sSf --max-time 3 "${SERVER}/health" >/dev/null 2>&1; do
+                    i=$((i+1))
+                    if [ "$i" -ge 30 ]; then
+                      echo "[host-gc] server /health not answering after 150s — giving up"
+                      exit 1
+                    fi
+                    sleep 5
+                  done
+
+                  echo "[host-gc] POST /auth/login as ${OMNIGENT_ADMIN_USERNAME}"
+                  LOGIN_RESP=$(curl -sS --max-time 10 \
+                    -X POST -H 'Content-Type: application/json' \
+                    --data "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
+                    "${SERVER}/auth/login")
+                  TOKEN=$(echo "$LOGIN_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  if [ -z "$TOKEN" ]; then
+                    echo "[host-gc] login failed — response: $LOGIN_RESP"
+                    exit 1
+                  fi
+
+                  echo "[host-gc] GET /v1/hosts"
+                  HOSTS=$(curl -sS --max-time 10 \
+                    -H "Authorization: Bearer ${TOKEN}" \
+                    "${SERVER}/v1/hosts")
+
+                  # Cutoff epoch = now - retention_minutes*60
+                  NOW=$(date -u +%s)
+                  CUTOFF=$((NOW - RETENTION_MINUTES * 60))
+
+                  # Parse response without jq (curlimages/curl is minimal).
+                  # Emit `host_id|name|status|last_seen_at` lines, one per host.
+                  PARSED=$(echo "$HOSTS" | awk '
+                    BEGIN { RS="}"; FS="," }
+                    /host_id|"id"/ {
+                      hid=""; name=""; status=""; last=""
+                      for (i=1;i<=NF;i++) {
+                        if ($i ~ /"(host_id|id)"[[:space:]]*:/)          { gsub(/.*:[[:space:]]*"|".*/, "", $i); hid=$i }
+                        else if ($i ~ /"name"[[:space:]]*:/)             { gsub(/.*:[[:space:]]*"|".*/, "", $i); name=$i }
+                        else if ($i ~ /"status"[[:space:]]*:/)           { gsub(/.*:[[:space:]]*"|".*/, "", $i); status=$i }
+                        else if ($i ~ /"last_seen_at"[[:space:]]*:/)     { gsub(/.*:[[:space:]]*"|".*/, "", $i); last=$i }
+                      }
+                      if (hid != "") print hid "|" name "|" status "|" last
+                    }
+                  ')
+
+                  if [ -z "$PARSED" ]; then
+                    echo "[host-gc] no hosts returned (or parse produced nothing) — nothing to do"
+                    exit 0
+                  fi
+
+                  TOTAL=0
+                  STALE=0
+                  echo "$PARSED" | while IFS='|' read -r HID NAME STATUS LAST; do
+                    TOTAL=$((TOTAL+1))
+                    # Skip online hosts
+                    if [ "$STATUS" = "online" ]; then
+                      continue
+                    fi
+                    # Convert last_seen_at (ISO-8601) to epoch. `date -d` on
+                    # busybox understands ISO with 'T' and 'Z'; if it doesn't
+                    # parse we skip conservatively (better to leave a host
+                    # than nuke one we misread).
+                    LAST_EPOCH=$(date -u -d "$LAST" +%s 2>/dev/null || echo "")
+                    if [ -z "$LAST_EPOCH" ]; then
+                      echo "[host-gc] skip ${HID} — unparseable last_seen_at='${LAST}'"
+                      continue
+                    fi
+                    if [ "$LAST_EPOCH" -gt "$CUTOFF" ]; then
+                      continue
+                    fi
+                    OFFLINE_SEC=$((NOW - LAST_EPOCH))
+                    OFFLINE_H=$((OFFLINE_SEC / 3600))
+                    OFFLINE_M=$(((OFFLINE_SEC % 3600) / 60))
+                    STALE=$((STALE+1))
+                    if [ "$DRY_RUN" = "true" ]; then
+                      echo "[host-gc] would delete host ${HID} (name=${NAME}, offline for ${OFFLINE_H}h${OFFLINE_M}m) — DRY_RUN"
+                    else
+                      # NOTE: as of 2026-08-31 the upstream API has no
+                      # DELETE /v1/hosts/{host_id}. This branch is a placeholder
+                      # for when it lands. Keep the template in sync with the
+                      # openapi.json probe documented at the top of this file.
+                      CODE=$(curl -sS -o /tmp/gc-resp -w '%{http_code}' \
+                        --max-time 10 \
+                        -X DELETE \
+                        -H "Authorization: Bearer ${TOKEN}" \
+                        "${SERVER}/v1/hosts/${HID}")
+                      case "$CODE" in
+                        200|202|204)
+                          echo "[host-gc] deleted host ${HID} (name=${NAME}, offline for ${OFFLINE_H}h${OFFLINE_M}m)"
+                          ;;
+                        404)
+                          echo "[host-gc] host ${HID} already gone (404) — ok"
+                          ;;
+                        405)
+                          echo "[host-gc] DELETE not supported by server (405) — set hostGc.dryRun=true or upgrade omnigent-server"
+                          exit 0
+                          ;;
+                        *)
+                          echo "[host-gc] DELETE ${HID} returned ${CODE}:"
+                          cat /tmp/gc-resp || true
+                          echo ""
+                          # don't fail the whole job for one bad host
+                          ;;
+                      esac
+                    fi
+                  done
+
+                  echo "[host-gc] scan complete"
+{{- end }}

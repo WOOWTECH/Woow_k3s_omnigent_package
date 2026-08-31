@@ -1,0 +1,87 @@
+name: chart-release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'charts/**'
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  package-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Login to GHCR
+        run: |
+          helm registry login ghcr.io \
+            -u "${{ github.actor }}" \
+            -p "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Compute OWNER_LC (GHCR requires lowercase)
+        id: owner
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "OWNER_LC=${OWNER_LC}" >> "$GITHUB_ENV"
+
+      - name: Derive chart + app version
+        id: ver
+        run: |
+          CHART_VERSION="$(awk '/^version:/ {print $2; exit}' charts/omnigent/Chart.yaml | tr -d '\"')"
+          APP_VERSION="$(awk '/^appVersion:/ {print $2; exit}' charts/omnigent/Chart.yaml | tr -d '\"')"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # Release tag wins, strip leading "v"
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          else
+            # main push -> pre-release tag so we never overwrite the latest stable
+            SHORT_SHA="${GITHUB_SHA::7}"
+            VERSION="${CHART_VERSION}-main.${SHORT_SHA}"
+          fi
+
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+          echo "Resolved chart version: ${VERSION} (appVersion=${APP_VERSION})"
+
+      - name: helm package
+        run: |
+          mkdir -p /tmp/pkg
+          helm package charts/omnigent \
+            --version "${VERSION}" \
+            --app-version "${APP_VERSION}" \
+            -d /tmp/pkg
+
+      - name: helm push (OCI) to ghcr.io/${OWNER_LC}/charts
+        run: |
+          helm push "/tmp/pkg/omnigent-${VERSION}.tgz" \
+            "oci://ghcr.io/${OWNER_LC}/charts"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published chart"
+            echo ""
+            echo '```'
+            helm show chart "oci://ghcr.io/${OWNER_LC}/charts/omnigent" --version "${VERSION}" || true
+            echo '```'
+            echo ""
+            echo "Install:"
+            echo '```bash'
+            echo "helm install omnigent oci://ghcr.io/${OWNER_LC}/charts/omnigent --version ${VERSION} \\"
+            echo "  --create-namespace -n omnigent \\"
+            echo "  --set-file cloudflared.credentials=creds.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

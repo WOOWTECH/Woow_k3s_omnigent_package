@@ -79,3 +79,61 @@ Design log for `Woow_k3s_omnigent_package`, the k3s sibling of
 - **Live host GC**: sibling podman issue W2-HIGH-3 also applies here —
   runner pod restart leaves orphan host_id in `/v1/hosts`. UI's
   Switch-Host modal is the workaround; upstream fix is #TBD.
+
+## Follow-ups SHIPPED
+
+- **pgbouncer sidecar in server pod — SHIPPED 2026-08-31.** Closes the
+  Resilience Test 3 caveat where an `omnigent-postgres` StatefulSet
+  restart left the server's asyncpg pool holding stale sockets and
+  kubelet needed ~125s of failing liveness probes to kill and restart
+  the server pod. New shape: `bitnami/pgbouncer:1.24.0` runs as a
+  sidecar container inside the server pod on `127.0.0.1:6432`, no
+  Service (pod-local only), backed by `omnigent-postgres:5432`. Server
+  `DATABASE_URL` is overridden inline in the container env
+  (`postgresql+psycopg://omnigent:$(POSTGRES_PASSWORD)@127.0.0.1:6432/omnigent`)
+  so the `omnigent-postgres` Secret keeps its original shape for other
+  consumers (setup-admin Job, host-gc CronJob, smoke test). Pool mode
+  is `session` — omnigent's SQLAlchemy async engine relies on prepared
+  statements, which `transaction` / `statement` modes break.
+  Target recovery on Postgres restart: **<30s** (was 125s), with no
+  server-pod restart. All knobs surface under `pgbouncer:` in
+  `values.yaml`; `pgbouncer.enabled=false` cleanly reverts to the
+  direct Secret-backed connection (verified via `helm template … --set
+  pgbouncer.enabled=false`). Sibling podman package will need the same
+  fix if/when it hits the equivalent scenario.
+
+## Follow-ups PARTIAL
+
+- **Host GC CronJob (W2-HIGH-3 / K3S-MED-1) — dry-run-only shipped
+  2026-08-31.** Added `templates/host-gc-cronjob.yaml` +
+  `templates/host-gc-rbac.yaml` and `hostGc:` block in `values.yaml`.
+  Runs daily at 03:00 UTC (`concurrencyPolicy: Forbid`,
+  successful/failed history 3/3), logs in as admin via the existing
+  `omnigent-admin` Secret, lists `/v1/hosts`, and identifies hosts
+  where `status != "online"` AND `last_seen_at` older than
+  `retentionMinutes` (default 60).
+
+  **Why PARTIAL, not DONE**: endpoint discovery against
+  `omnigent.woowtech.io` (`GET /openapi.json`) on 2026-08-31 shows the
+  API surface for `/v1/hosts*` is read-only —
+  `GET /v1/hosts`, `GET /v1/hosts/{host_id}`, plus a bunch of
+  per-host POST/GET subresources (runners, harnesses,
+  filesystem, worktrees, credentials). There is **no
+  `DELETE /v1/hosts/{host_id}`** (nor any DELETE anywhere under
+  `/v1/hosts`). So the CronJob currently only *logs* the offline
+  hosts it would delete and exits 0. The DELETE branch is written
+  and treats a 405 response as "server doesn't support this yet,
+  no-op cleanly" — the moment upstream ships the endpoint the
+  same CronJob starts pruning without a chart change (just bump
+  the runner image / server image).
+
+  Upstream ask needed: expose `DELETE /v1/hosts/{host_id}` (idempotent,
+  returns 204 on success and 404 if already gone). Track that
+  issue; when it merges, flip this section to DONE and remove the
+  405-tolerance branch in the template.
+
+- **RBAC**: the CronJob talks to `omnigent-server` (JWT), not
+  kube-apiserver, so no `Role`/`RoleBinding` was created. Only a
+  dedicated `ServiceAccount omnigent-host-gc` with
+  `automountServiceAccountToken: false` for audit separation.
+  Documented in `templates/host-gc-rbac.yaml`.

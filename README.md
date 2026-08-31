@@ -18,7 +18,7 @@ auto-claims the first admin so `helm install` is zero-manual-step.
 |---|---|
 | **Public URL** | Whatever you configure via cloudflared (default: `https://omnigent.woowtech.io`) |
 | **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:latest` |
-| **Runners** | `ghcr.io/woowtech/woow-omnigent-runner-amd64:main` (built by the podman sibling's CI); one Deployment per host name (`pi1`, `pi4`, `pi5` by default) |
+| **Runners** | `ghcr.io/woowtech/woow-omnigent-runner:main` — multi-arch manifest list (amd64 + arm64) built by the podman sibling's CI; one Deployment per host name (`pi1`, `pi4`, `pi5` by default) |
 | **Database** | PostgreSQL 16-alpine as a StatefulSet, RWO Longhorn PVC |
 | **Auth** | Built-in accounts; admin auto-claimed by post-install Job |
 | **Ingress** | Cloudflared sidecar Deployment (2 replicas) using cloudflare-managed config |
@@ -66,6 +66,31 @@ Open `https://omnigent.woowtech.io/` (or whatever you configured), log in as
 `woow` / `woowtech2026` (the defaults from `charts/omnigent/values.yaml` —
 **change before deploying outside your trust boundary**).
 
+## Install from GHCR (no git clone needed)
+
+The chart is also published as an OCI artifact to
+`ghcr.io/woowtech/charts/omnigent` on every push to `main` (as a pre-release
+`X.Y.Z-main.<sha>` tag) and on every GitHub release (as the stable `X.Y.Z`
+tag). Helm 3.8+ speaks OCI natively, so downstream consumers can skip the
+`git clone` entirely:
+
+```bash
+# 1. Still need the cloudflared tunnel creds JSON (see the git-clone block
+#    above for how to mint one). The released chart's default values expect
+#    it — the shortcut path is to feed the file straight in with --set-file:
+helm install omnigent oci://ghcr.io/woowtech/charts/omnigent \
+  --version 0.1.0 \
+  --create-namespace -n omnigent \
+  --set-file cloudflared.credentials=creds.json
+
+# 2. Seed still runs separately — the post-install Job auto-claims admin,
+#    but you still need to helm test / helm upgrade after tuning any values.
+helm test omnigent -n omnigent
+```
+
+Pin `--version` to a stable release (`X.Y.Z`) for production; `-main.<sha>`
+tags exist for tracking `main` but aren't guaranteed to stick around.
+
 ## Chart layout
 
 ```
@@ -78,19 +103,25 @@ charts/omnigent/
     namespace.yaml
     secrets.yaml               # omnigent-admin + omnigent-postgres Secrets
     postgres-statefulset.yaml  # StatefulSet + headless Service + volumeClaimTemplate
-    server-deployment.yaml     # Deployment + PVC + Service
+    server-deployment.yaml     # Deployment + PVC + Service; optional pgbouncer sidecar
     runner-deployments.yaml    # N Deployments + N PVCs (per .Values.runner.hosts)
-    setup-admin-job.yaml       # post-install/post-upgrade hook Job
+    setup-admin-job.yaml       # post-install/post-upgrade hook Job (auto-claim admin)
+    host-gc-cronjob.yaml       # daily sweep for offline hosts (dry-run until upstream DELETE)
+    host-gc-rbac.yaml          # ServiceAccount for the CronJob (no kube RBAC needed)
     cloudflared-deployment.yaml
+    cloudflared-secret.yaml    # optional in-chart Secret rendered from values (OCI install path)
     tests/smoke.yaml           # helm test hook Pod
 scripts/
   apply.sh                     # render / install / upgrade
   uninstall.sh                 # uninstall; --purge also deletes PVCs
+  seed-pi-from.sh              # tar-pipe pi state from a live pi-agent-N pod into a runner PVC
+tests/e2e/                     # Playwright suite (adapted from podman sibling)
 docs/
   plans/2026-08-31-initial-package.md
   tests/                       # populated by e2e passes
 .github/workflows/
   chart.yml                    # helm lint + kubeconform on push
+  chart-release.yml            # helm package + push to ghcr.io/<owner>/charts (OCI)
 ```
 
 ## Design decisions vs. podman sibling
@@ -104,7 +135,38 @@ docs/
 | Runner login race | `runner-loop` waits for `/health` before login | Same, plus a chart-side `initContainer` waits for `needs_setup=false` — otherwise the runner-loop's `sleep infinity` on login failure blocks until manual restart |
 | Public URL | Tailscale serve `--https=9444` | Cloudflared sidecar with cloudflare-managed config |
 | Health probe | podman `HealthCmd` on `/health` (never `/healthz` — SPA catch-all) | k8s `readinessProbe` + `livenessProbe` on `/health` |
-| Image tag | Uses `localhost/woow-omnigent-runner:latest` (local build) | Uses `ghcr.io/woowtech/woow-omnigent-runner-amd64:main` (published by podman sibling's CI — no image build in this repo) |
+| Image tag | Uses `localhost/woow-omnigent-runner:latest` (local build) | Uses `ghcr.io/woowtech/woow-omnigent-runner:main` multi-arch manifest (amd64 + arm64) — published by podman sibling's CI, no image build in this repo |
+
+## Postgres connection pooling
+
+The `omnigent-server` pod ships a **pgbouncer sidecar** (`bitnami/pgbouncer`,
+port 6432, pod-local, no Service) that sits between the FastAPI server and the
+`omnigent-postgres` StatefulSet. Without it, when Postgres restarts the
+server's asyncpg pool held stale sockets and kubelet needed ~125s (measured
+in Resilience Test 3 on 2026-08-31) to fail liveness enough times to
+restart the server pod. With the pool front-end, Postgres flaps become
+transparent — target recovery is <30s and the server pod stays up.
+
+Pool mode defaults to **`session`** because omnigent's async SQLAlchemy
+engine relies on prepared statements — `transaction` / `statement` modes
+would break those. All knobs are values-tunable:
+
+```yaml
+pgbouncer:
+  enabled: true                              # set false to bypass and connect direct
+  image: docker.io/bitnami/pgbouncer:1.24.0
+  poolMode: session                          # session | transaction | statement
+  maxClientConn: 100
+  defaultPoolSize: 25
+  serverLifetime: 3600
+  serverIdleTimeout: 600
+  resources: {}
+```
+
+When `pgbouncer.enabled=false`, the server's `DATABASE_URL` reverts to the
+Secret-baked `omnigent-postgres:5432` connection string; no sidecar is
+rendered. Useful for A/B comparing pool vs. no-pool behaviour, or for
+older deployments that predate the sidecar.
 
 ## Uninstall
 
