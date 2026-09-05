@@ -154,14 +154,17 @@ spec:
             # to it via 127.0.0.1 and no other pod should touch it.
             - name: pgbouncer
               containerPort: 6432
+          # TCP probe — bitnamilegacy/pgbouncer image doesn't ship pg_isready,
+          # so we test the socket instead. pgbouncer listens on 6432 the
+          # moment the process is up; that's a strong enough liveness signal.
           readinessProbe:
-            exec:
-              command: [pg_isready, -h, 127.0.0.1, -p, "6432", -U, omnigent]
+            tcpSocket:
+              port: 6432
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            exec:
-              command: [pg_isready, -h, 127.0.0.1, -p, "6432", -U, omnigent]
+            tcpSocket:
+              port: 6432
             initialDelaySeconds: 30
             periodSeconds: 30
             failureThreshold: 3
