@@ -124,6 +124,14 @@ spec:
           image: {{ .Values.pgbouncer.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
+            # AUTH_TYPE=trust — pgbouncer sits at 127.0.0.1 inside the same
+            # pod as the server; no other container can reach 6432. Trusting
+            # localhost skips SCRAM negotiation which the bitnamilegacy
+            # image doesn't auto-configure with matching hashes for asyncpg.
+            # pgbouncer still authenticates itself against the real Postgres
+            # normally using POSTGRESQL_PASSWORD.
+            - name: PGBOUNCER_AUTH_TYPE
+              value: trust
             - name: POSTGRESQL_USERNAME
               value: omnigent
             - name: POSTGRESQL_PASSWORD
