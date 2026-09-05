@@ -86,7 +86,8 @@ Design log for `Woow_k3s_omnigent_package`, the k3s sibling of
   Resilience Test 3 caveat where an `omnigent-postgres` StatefulSet
   restart left the server's asyncpg pool holding stale sockets and
   kubelet needed ~125s of failing liveness probes to kill and restart
-  the server pod. New shape: `bitnami/pgbouncer:1.24.0` runs as a
+  the server pod. New shape: `bitnamilegacy/pgbouncer:1.24.1-debian-12-r10`
+  runs as a
   sidecar container inside the server pod on `127.0.0.1:6432`, no
   Service (pod-local only), backed by `omnigent-postgres:5432`. Server
   `DATABASE_URL` is overridden inline in the container env

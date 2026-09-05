@@ -150,7 +150,7 @@ prepared statement 跑，`transaction` / `statement` 模式會壞掉。所有旋
 ```yaml
 pgbouncer:
   enabled: true                              # 設 false 就跳過 pool 直連
-  image: docker.io/bitnami/pgbouncer:1.24.0
+  image: docker.io/bitnamilegacy/pgbouncer:1.24.1-debian-12-r10
   poolMode: session                          # session | transaction | statement
   maxClientConn: 100
   defaultPoolSize: 25

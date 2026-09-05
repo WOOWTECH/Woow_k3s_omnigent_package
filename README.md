@@ -154,7 +154,7 @@ would break those. All knobs are values-tunable:
 ```yaml
 pgbouncer:
   enabled: true                              # set false to bypass and connect direct
-  image: docker.io/bitnami/pgbouncer:1.24.0
+  image: docker.io/bitnamilegacy/pgbouncer:1.24.1-debian-12-r10
   poolMode: session                          # session | transaction | statement
   maxClientConn: 100
   defaultPoolSize: 25
