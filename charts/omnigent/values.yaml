@@ -71,9 +71,11 @@ server:
   # OMNIGENT_AUTH_ENABLED=1 = built-in accounts. Keep this on unless the
   # deployment is behind a trusted-LAN-only auth layer.
   authEnabled: true
-  # Feature flags forwarded via OMNIGENT_FEATURES=. Empty by default; add
-  # comma-separated flag names to enable page-gated features (e.g. usage_page).
-  features: ""
+  # Feature flags forwarded via OMNIGENT_FEATURES=. Comma-separated.
+  # omnigent 0.12.0 supports exactly two: usage_page (adds Usage nav +
+  # cost dashboard) and harness_install (enables Set-up-Claude-Code UI).
+  # Unknown flags abort server boot, so keep to this list.
+  features: "usage_page,harness_install"
   storage:
     # Persistent /data (admin-credentials file, artifacts). Small — server
     # rarely writes here.
