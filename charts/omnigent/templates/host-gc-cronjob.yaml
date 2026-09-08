@@ -103,7 +103,15 @@ spec:
                     -X POST -H 'Content-Type: application/json' \
                     --data "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
                     "${SERVER}/auth/login")
+                  # POST /auth/login returns {"token": "...", "expires_in": ...}.
+                  # The original parser only looked for "access_token", which
+                  # this API has never returned, so every run failed with
+                  # "login failed" and exit 1 despite a successful HTTP 200
+                  # and a valid JWT in the body. Accept both spellings.
                   TOKEN=$(echo "$LOGIN_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  if [ -z "$TOKEN" ]; then
+                    TOKEN=$(echo "$LOGIN_RESP" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  fi
                   if [ -z "$TOKEN" ]; then
                     echo "[host-gc] login failed — response: $LOGIN_RESP"
                     exit 1

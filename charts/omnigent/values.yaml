@@ -222,12 +222,33 @@ setupAdmin:
 # offline hosts from /v1/hosts. Closes W2-HIGH-3 / K3S-MED-1 from the sibling
 # repos' E2E reports where every runner pod restart leaves an orphan host_id.
 #
-# STATUS 2026-08-31: dry-run-only. Upstream API has GET /v1/hosts and
-# GET /v1/hosts/{host_id} but no DELETE. The CronJob logs offline hosts it
-# would have deleted and exits 0. When the DELETE endpoint lands, flip
-# `dryRun: false` and the same job starts pruning. See
-# templates/host-gc-cronjob.yaml for the full endpoint discovery snapshot.
+# STATUS 2026-09-09 (re-verified against omnigent 0.11.0 — supersedes the
+# 2026-08-31 note): this CronJob CANNOT do its job, for three independent
+# reasons. Recommend `enabled: false` until upstream changes.
+#
+#   1. The retention check can never fire. `GET /v1/hosts` returns exactly
+#      host_id, name, owner, status, sandbox_provider, configured_harnesses
+#      and gateway_inference (see server/routes/hosts.py::list_hosts).
+#      There is **no last_seen_at field** — the script parses one that the
+#      API has never emitted, so every host hits the "unparseable
+#      last_seen_at" branch and is skipped. Liveness is computed server-side
+#      from the DB column `hosts.updated_at`, which is not exposed.
+#   2. There is still no DELETE. openapi.json confirms /v1/hosts/{host_id}
+#      is GET-only. (host_store.py does implement delete_host(), but no
+#      route exposes it.) So a fixed parser would only ever collect 405s.
+#   3. There is nothing to collect. The `hosts` table holds 8 rows, all
+#      real operator machines. The orphan-host accumulation this job was
+#      written for (W2-HIGH-3 / K3S-MED-1) is not occurring here.
+#
+# The failure mode also isn't neutral: with dryRun=false and a "working"
+# parser, the only row matching "offline > 60m" would be a developer laptop
+# that was simply powered off overnight — deleting it would drop a real
+# host from the picker. Until upstream ships both a timestamp field and a
+# DELETE endpoint, leaving this disabled is strictly safer than fixing it.
 hostGc:
+  # Recommended: false. See the three findings above. Left true here so the
+  # chart default does not silently change behaviour on existing installs;
+  # operators should set this to false in their overlay.
   enabled: true
   schedule: "0 3 * * *"       # 03:00 UTC daily
   retentionMinutes: 60        # delete hosts offline > this many minutes
