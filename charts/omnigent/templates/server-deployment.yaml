@@ -101,19 +101,26 @@ spec:
           # Never probe /healthz — it's shadowed by the React SPA catch-all
           # and returns HTML 200 even when FastAPI is dead. /health returns
           # {"status":"ok"} JSON only when the API is up.
+          # timeoutSeconds is set explicitly: omitting it lets Kubernetes
+          # apply its 1s default, which is not enough for a health check
+          # that queries Postgres. A slow pool then reads as "dead" and the
+          # kubelet restarts a perfectly healthy server.
           readinessProbe:
             httpGet:
               path: {{ .Values.server.healthPath | quote }}
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.server.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: {{ .Values.server.healthPath | quote }}
               port: http
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.server.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.liveness.failureThreshold }}
           volumeMounts:
             - name: server-data
               mountPath: /data
@@ -153,6 +160,18 @@ spec:
               value: {{ .Values.pgbouncer.maxClientConn | quote }}
             - name: PGBOUNCER_DEFAULT_POOL_SIZE
               value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: PGBOUNCER_MIN_POOL_SIZE
+              value: {{ .Values.pgbouncer.minPoolSize | quote }}
+            # Reserve pool absorbs short bursts above defaultPoolSize
+            # instead of making clients queue on query_wait_timeout.
+            - name: PGBOUNCER_RESERVE_POOL_SIZE
+              value: {{ .Values.pgbouncer.reservePoolSize | quote }}
+            - name: PGBOUNCER_RESERVE_POOL_TIMEOUT
+              value: {{ .Values.pgbouncer.reservePoolTimeout | quote }}
+            - name: PGBOUNCER_MAX_DB_CONNECTIONS
+              value: {{ .Values.pgbouncer.maxDbConnections | quote }}
+            - name: PGBOUNCER_QUERY_WAIT_TIMEOUT
+              value: {{ .Values.pgbouncer.queryWaitTimeout | quote }}
             - name: PGBOUNCER_SERVER_LIFETIME
               value: {{ .Values.pgbouncer.serverLifetime | quote }}
             - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
@@ -170,12 +189,15 @@ spec:
               port: 6432
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             tcpSocket:
               port: 6432
             initialDelaySeconds: 30
             periodSeconds: 30
-            failureThreshold: 3
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
         {{- end }}

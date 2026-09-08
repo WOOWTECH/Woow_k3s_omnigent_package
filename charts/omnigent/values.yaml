@@ -28,7 +28,31 @@ postgres:
     size: 20Gi
     storageClassName: longhorn
     accessModes: [ReadWriteOnce]
-  resources: {}
+  # max_connections must stay above pgbouncer.maxDbConnections with room to
+  # spare for maintenance/superuser sessions. The stock postgres default of
+  # 100 was the hard ceiling that made any pgbouncer resizing pointless.
+  maxConnections: 500
+  # Server tuning passed as `-c key=value` args to the postgres entrypoint.
+  # Sized against the resources block below (shared_buffers ~= 1/6 of the
+  # memory limit is the conventional starting point).
+  sharedBuffers: 4GB
+  effectiveCacheSize: 12GB
+  maintenanceWorkMem: 512MB
+  workMem: 16MB
+  maxWorkerProcesses: 16
+  maxParallelWorkers: 16
+  maxParallelWorkersPerGather: 4
+  # Postgres puts parallel-query dynamic shared memory in /dev/shm. The
+  # container runtime default is 64Mi, which can fail large parallel scans,
+  # so the chart mounts a tmpfs of this size at /dev/shm.
+  shmSize: 2Gi
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "16"
+      memory: 24Gi
 
 # --- pgbouncer (server-pod sidecar) ----------------------------------------
 # Sits inside the omnigent-server pod on 127.0.0.1:6432 and hands the server a
@@ -39,10 +63,21 @@ postgres:
 # Resilience Test 3 on 2026-08-31. With pgbouncer the server reconnects
 # through the pool front-end and target recovery is <30s.
 #
-# Uses `session` pool mode because omnigent's FastAPI stack relies on asyncpg
-# prepared statements — `transaction` / `statement` modes break those. Sizing
-# defaults are conservative for a single-server + 3-runner deployment; tune
-# per-tenant via values overlay.
+# Pool mode is `session`. NOTE: the previous rationale here ("omnigent's
+# FastAPI stack relies on asyncpg prepared statements") was wrong on both
+# counts and is corrected as of 2026-09-09:
+#   * The stack is **psycopg3**, not asyncpg — the DSN is
+#     `postgresql+psycopg://` and tracebacks surface `psycopg/cursor.py`.
+#   * pgbouncer 1.24.1 sets `max_prepared_statements=200` by default, which
+#     handles protocol-level prepared statements in `transaction` mode fine.
+# A source audit of omnigent 0.11.0 found no LISTEN/NOTIFY, no advisory
+# locks, no temp tables and no WITH HOLD cursors. The only session-scoped
+# state is `SET LOCAL statement_timeout` in the conversation store, and
+# SET LOCAL reverts on commit. So `transaction` mode is in fact SAFE here.
+#
+# We still default to `session` because, with the sizing below, session mode
+# no longer saturates — transaction mode would buy nothing at current load.
+# Keep it as the documented escape hatch if connection counts ever get tight.
 #
 # Toggle: set `enabled: false` to revert to a direct
 # `omnigent-postgres:5432` connection (server DATABASE_URL falls back to the
@@ -53,14 +88,49 @@ pgbouncer:
   # requires the Bitnami Secure Images subscription. Legacy repo still
   # ships debian-12-suffixed immutable tags.
   image: docker.io/bitnamilegacy/pgbouncer:1.24.1-debian-12-r10
-  # session | transaction | statement — session is the only safe mode for
-  # asyncpg + prepared statements; the other two are here for reference.
+  # session | transaction | statement. See the note above: `transaction` is
+  # audited-safe for this app; `session` is the deliberate default.
   poolMode: session
-  maxClientConn: 100
-  defaultPoolSize: 25
+  # --- Sizing -------------------------------------------------------------
+  # These MUST track the server's SQLAlchemy engine, which is not tunable
+  # from this chart. `omnigent/db/utils.py` hardcodes
+  # `pool_size=200, max_overflow=20` (max 220 connections), deliberately
+  # aligned with the AnyIO thread limiter in `server/app.py`
+  # (`total_tokens = 200`). The app is therefore *designed* to open up to
+  # 220 pooled connections.
+  #
+  # The old `defaultPoolSize: 25` was 8x below that ceiling, so in session
+  # mode — where a client connection owns its server connection until it
+  # disconnects — SQLAlchemy's long-lived connections pinned all 25 and the
+  # pool ran permanently full. Symptom chain observed in prod on
+  # 2026-09-08/09: `SHOW POOLS` at sv_active=25 / sv_idle=0 / maxwait=111s,
+  # then `psycopg.errors.ProtocolViolation: query_wait_timeout` (120s cap)
+  # → API 500s → /health exceeding its probe timeout → liveness SIGKILL of
+  # the server container every ~30 min (exitCode 137, NOT an OOM).
+  #
+  # Chain now aligned: SQLAlchemy 220 max → pgbouncer 200 + 50 reserve
+  # → maxDbConnections 400 → postgres maxConnections 500.
+  maxClientConn: 1000
+  defaultPoolSize: 200
+  minPoolSize: 10
+  reservePoolSize: 50
+  reservePoolTimeout: 3
+  # Ceiling across all pools for this database; keeps pgbouncer below
+  # postgres.maxConnections even if several pools fill at once.
+  maxDbConnections: 400
+  # How long a client may wait for a server connection before pgbouncer
+  # errors it out. Left at the pgbouncer default; with the sizing above it
+  # should never be reached — if it is, that is the saturation alarm.
+  queryWaitTimeout: 120
   serverLifetime: 3600
   serverIdleTimeout: 600
-  resources: {}
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "4"
+      memory: 4Gi
 
 # --- omnigent-server -------------------------------------------------------
 server:
@@ -82,11 +152,34 @@ server:
     size: 5Gi
     storageClassName: longhorn
     accessModes: [ReadWriteOnce]
-  resources: {}
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "16"
+      memory: 24Gi
   # Podman version had this HTTP path issue too — /healthz is shadowed by
   # the React SPA catch-all and returns HTML 200 even when the API is dead.
   # /health returns {"status":"ok"} JSON. See docs/plans/2026-08-31-initial-package.md.
   healthPath: /health
+  # Probe tuning. The chart previously set no timeoutSeconds at all, so
+  # Kubernetes applied its default of **1 second** — far too tight for an
+  # endpoint that touches the database. During the 2026-09-08 pool
+  # saturation that 1s timeout is what converted DB slowness into a liveness
+  # SIGKILL loop. Generous timeouts here make the probes report real
+  # liveness instead of amplifying transient DB latency into a restart.
+  probes:
+    readiness:
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
 
 # --- runner ----------------------------------------------------------------
 # One Deployment per entry; each dials into the server, registers a host,
@@ -165,4 +258,10 @@ cloudflared:
   # Optional: override TunnelID in the rendered config.yaml. Defaults to
   # `.TunnelID` parsed out of `credentials` JSON via `fromJson`.
   tunnelId: ""
-  resources: {}
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "4"
+      memory: 2Gi

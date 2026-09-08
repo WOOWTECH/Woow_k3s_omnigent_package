@@ -23,28 +23,64 @@ spec:
         - name: postgres
           image: {{ .Values.postgres.image | quote }}
           imagePullPolicy: IfNotPresent
+          # Server tuning. The stock image ships max_connections=100, which
+          # capped the whole connection chain regardless of how pgbouncer
+          # was sized — see the pgbouncer sizing note in values.yaml.
+          args:
+            - postgres
+            - -c
+            - max_connections={{ .Values.postgres.maxConnections }}
+            - -c
+            - shared_buffers={{ .Values.postgres.sharedBuffers }}
+            - -c
+            - effective_cache_size={{ .Values.postgres.effectiveCacheSize }}
+            - -c
+            - maintenance_work_mem={{ .Values.postgres.maintenanceWorkMem }}
+            - -c
+            - work_mem={{ .Values.postgres.workMem }}
+            - -c
+            - max_worker_processes={{ .Values.postgres.maxWorkerProcesses }}
+            - -c
+            - max_parallel_workers={{ .Values.postgres.maxParallelWorkers }}
+            - -c
+            - max_parallel_workers_per_gather={{ .Values.postgres.maxParallelWorkersPerGather }}
           envFrom:
             - secretRef:
                 name: omnigent-postgres
           ports:
             - name: pg
               containerPort: 5432
+          # timeoutSeconds set explicitly — the Kubernetes default of 1s
+          # makes pg_isready flaky under load and can restart a healthy DB.
           readinessProbe:
             exec:
               command: [pg_isready, -U, omnigent, -d, omnigent]
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 6
           livenessProbe:
             exec:
               command: [pg_isready, -U, omnigent, -d, omnigent]
             initialDelaySeconds: 30
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
               subPath: pgdata
+            # Parallel query puts dynamic shared memory here; the runtime
+            # default of 64Mi is too small once parallel workers are on.
+            - name: dshm
+              mountPath: /dev/shm
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.postgres.shmSize | quote }}
   volumeClaimTemplates:
     - metadata:
         name: data
