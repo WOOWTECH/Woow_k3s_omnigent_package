@@ -1,12 +1,21 @@
 {{- if .Values.hostGc.enabled -}}
 {{- /*
-Periodic host GC — closes W2-HIGH-3 / K3S-MED-1 from the sibling repos' E2E
-reports (every runner pod restart leaves an orphan host_id in
+Periodic host GC — was meant to close W2-HIGH-3 / K3S-MED-1 from the sibling
+repos' E2E reports (every runner pod restart leaves an orphan host_id in
 /v1/hosts, so the UI's host picker grows monotonically).
 
-IMPORTANT — dry-run-only as of 2026-08-31.
-Endpoint discovery against the live cluster (omnigent-server 8000 /openapi.json)
-shows the API surface for hosts is READ-ONLY:
+STATUS 2026-09-09 — this CronJob cannot do its job. See the hostGc block in
+values.yaml for the three independent reasons (no last_seen_at field in the
+API response, no DELETE route, and nothing stale to collect) and why
+`hostGc.enabled: false` is the recommended setting. It is still rendered by
+default so that enabling the chart's default values does not silently change
+behaviour on existing installs.
+
+What it does today: waits for /health, logs in as the admin, lists hosts, and
+skips every one of them on the "unparseable last_seen_at" branch. Exit 0.
+
+Endpoint discovery against the live server (8000 /openapi.json) — the hosts
+surface is read-only:
 
     GET  /v1/hosts
     GET  /v1/hosts/{host_id}
@@ -19,15 +28,25 @@ shows the API surface for hosts is READ-ONLY:
     GET  /v1/hosts/{host_id}/credentials/detected
     GET  /v1/hosts/{host_id}/harnesses/{harness}/model-options
 
-There is NO `DELETE /v1/hosts/{host_id}` (or any DELETE under /v1/hosts).
-So this CronJob currently only *logs* the offline hosts it would have deleted
-and exits 0. Once upstream exposes a delete endpoint, flip .Values.hostGc.dryRun
-to false and the same job will start actually pruning.
+LOGIN PARSER: POST /auth/login returns {"token": ..., "expires_in": ...}. The
+original script only looked for "access_token", which this API has never
+returned, so every run failed with "login failed" and exit 1 despite an HTTP
+200 and a valid JWT in the body (live Jobs 29811060 / 29812500 / 29813940 all
+died there). The `"token"` fallback below fixes it. Do NOT add explanatory
+comments inside the args script: its text is compared byte for byte against the
+live CronJob, which carries the fallback but not the comments.
 
-RBAC: none needed. This job auths to omnigent-server via JWT (POST /auth/login)
-using the same omnigent-admin Secret as setup-admin-job.yaml. It does NOT talk
-to the kube-apiserver, so no ServiceAccount/Role is required — the default
-namespace ServiceAccount is fine.
+RBAC: the pod runs as the dedicated omnigent-host-gc ServiceAccount with
+automountServiceAccountToken: false — it only talks to omnigent-server over
+HTTP and never to the kube-apiserver. See host-gc-rbac.yaml.
+
+RESOURCES: hostGc.resources renders unconditionally, like the four other
+containers in this chart. It exists because the live CronJob carries a
+requests/limits block that was applied with `kubectl patch` on 2026-09-08 —
+same patch wave as the server, Postgres and cloudflared limits — and without a
+values key no instance file could reproduce it. Default {} (which the API
+server stores as `resources: {}` anyway); the live figures are in
+values/woow-k3s/omnigent.yaml.
 */ -}}
 apiVersion: batch/v1
 kind: CronJob
@@ -68,17 +87,19 @@ spec:
                 - name: OMNIGENT_ADMIN_USERNAME
                   valueFrom:
                     secretKeyRef:
-                      name: omnigent-admin
+                      name: {{ include "omnigent.adminSecretName" . }}
                       key: OMNIGENT_ADMIN_USERNAME
                 - name: OMNIGENT_ADMIN_PASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: omnigent-admin
+                      name: {{ include "omnigent.adminSecretName" . }}
                       key: OMNIGENT_ADMIN_PASSWORD
                 - name: RETENTION_MINUTES
                   value: {{ .Values.hostGc.retentionMinutes | quote }}
                 - name: DRY_RUN
                   value: {{ .Values.hostGc.dryRun | quote }}
+              resources:
+                {{- toYaml .Values.hostGc.resources | nindent 16 }}
               command: [/bin/sh, -c]
               args:
                 - |
@@ -105,7 +126,14 @@ spec:
                     "${SERVER}/auth/login")
                   TOKEN=$(echo "$LOGIN_RESP" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
                   if [ -z "$TOKEN" ]; then
+                    TOKEN=$(echo "$LOGIN_RESP" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+                  fi
+                  if [ -z "$TOKEN" ]; then
+                  {{- if .Values.hostGc.redactLoginResponseOnFailure }}
+                    echo "[host-gc] login failed — response withheld (a successful body carries an admin bearer token)"
+                  {{- else }}
                     echo "[host-gc] login failed — response: $LOGIN_RESP"
+                  {{- end }}
                     exit 1
                   fi
 

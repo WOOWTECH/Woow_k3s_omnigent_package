@@ -11,6 +11,24 @@
 #   RELEASE       helm release name (default: omnigent)
 #   CF_CREDS_JSON path to cloudflared credentials.json (default:
 #                 /tmp/omnigent-tunnel-creds.json)
+#   VALUES        instance values file (default: values/woow-k3s/omnigent.yaml)
+#   TIMEOUT       helm --timeout (default: 15m)
+#   RETAIN_FIX    upgrade only: let the retain preflight annotate the objects
+#                 it would otherwise block on (see below)
+#
+# UPGRADE SAFETY: `upgrade` always runs scripts/preflight-retain.sh first and
+# refuses to continue if this render would delete a live, data-bearing object
+# that the stored release manifest still carries. On this release that is
+# Secret/omnigent-admin and Secret/omnigent-postgres — revision 10 was installed
+# with secrets.create=true, the chart now defaults to false, and a plain
+# `helm upgrade` deletes both while reporting STATUS: deployed. There is no skip
+# flag: either annotate them yourself, or re-run with RETAIN_FIX=1 and let the
+# preflight do it. The annotation is additive metadata and restarts nothing.
+#
+# Credentials: the chart does NOT carry admin or Postgres passwords. Either the
+# Secrets omnigent-admin and omnigent-postgres already exist in the namespace
+# (see examples/secrets.example.yaml), or pass --set secrets.create=true plus
+# admin.username / admin.password / postgres.password on a fresh install.
 #
 # The chart's cloudflared sidecar expects a Secret with two keys:
 #   credentials.json — the tunnel creds you got from `cloudflared tunnel create`
@@ -25,6 +43,8 @@ RELEASE="${RELEASE:-omnigent}"
 CF_CREDS_JSON="${CF_CREDS_JSON:-/tmp/omnigent-tunnel-creds.json}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_DIR="${REPO_DIR}/charts/omnigent"
+VALUES="${VALUES:-${REPO_DIR}/values/woow-k3s/omnigent.yaml}"
+TIMEOUT="${TIMEOUT:-15m}"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
@@ -36,8 +56,7 @@ command -v kubectl >/dev/null || die "kubectl not installed"
 if [ "$MODE" = "render" ]; then
     say "helm template (dry-run)"
     helm template "${RELEASE}" "${CHART_DIR}" \
-        -f "${CHART_DIR}/values.yaml" \
-        -f "${CHART_DIR}/values-woow.yaml" \
+        -f "${VALUES}" \
         --namespace "${NAMESPACE}"
     exit 0
 fi
@@ -83,17 +102,30 @@ case "$MODE" in
         say "helm install ${RELEASE}"
         helm_ctx install "${RELEASE}" "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
-            -f "${CHART_DIR}/values.yaml" \
-            -f "${CHART_DIR}/values-woow.yaml" \
-            --wait --timeout 5m
+            -f "${VALUES}" \
+            --wait --timeout "${TIMEOUT}" "${@:2}"
         ;;
     upgrade)
+        # Unskippable: refuse to delete live data the new render omits.
+        say "retain preflight (scripts/preflight-retain.sh)"
+        PREFLIGHT_ARGS=()
+        [ "${RETAIN_FIX:-0}" = "1" ] && PREFLIGHT_ARGS+=(--fix)
+        CONTEXT="${KUBECONTEXT}" RELEASE="${RELEASE}" NAMESPACE="${NAMESPACE}" \
+        VALUES="${VALUES}" CHART="${CHART_DIR}" \
+            "${REPO_DIR}/scripts/preflight-retain.sh" "${PREFLIGHT_ARGS[@]+"${PREFLIGHT_ARGS[@]}"}" \
+            || die "retain preflight refused the upgrade (see above) — nothing was changed"
+        if [ "${RETAIN_FIX:-0}" = "1" ]; then
+            CONTEXT="${KUBECONTEXT}" RELEASE="${RELEASE}" NAMESPACE="${NAMESPACE}" \
+            VALUES="${VALUES}" CHART="${CHART_DIR}" \
+                "${REPO_DIR}/scripts/preflight-retain.sh" \
+                || die "retain preflight still refuses after --fix — stop and investigate"
+        fi
+
         say "helm upgrade ${RELEASE}"
         helm_ctx upgrade "${RELEASE}" "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
-            -f "${CHART_DIR}/values.yaml" \
-            -f "${CHART_DIR}/values-woow.yaml" \
-            --wait --timeout 5m
+            -f "${VALUES}" \
+            --wait --timeout "${TIMEOUT}" "${@:2}"
         ;;
     *)
         die "unknown mode: $MODE (render|install|upgrade)"

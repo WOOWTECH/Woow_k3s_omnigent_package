@@ -1,66 +1,178 @@
 # Default values for the omnigent chart.
-# Override in values-woow.yaml (in-repo overlay) or via `helm install --set`.
 #
-# Named to match the podman sibling's Environment= lines so anyone reading both
+# Naming mirrors the podman sibling's Environment= lines so anyone reading both
 # repos gets the same mental model.
+#
+# Two rules about this file:
+#   1. It contains NO credentials. `secrets.create` is false by default and the
+#      chart references Secrets that already exist in the namespace (see
+#      examples/secrets.example.yaml). Earlier revisions shipped the real
+#      admin / Postgres passwords here, in a public repo.
+#   2. Defaults are sized for a small, single-tenant install. The woow-k3s
+#      production instance overrides them in values/woow-k3s/omnigent.yaml,
+#      which renders byte-identical to what is running today.
 
 namespace:
-  # If create=true, the chart renders a Namespace resource. Set false when
-  # `helm install --namespace X --create-namespace` is preferred (usual).
+  # Render a Namespace object. A namespace equal to the release namespace
+  # (`-n`) is never rendered — create it with `--create-namespace` instead —
+  # so `helm uninstall` can never delete the namespace the release lives in.
   create: false
   name: omnigent
 
-# --- Admin credentials (single source of truth) ------------------------------
-# Both the auto-claim Job (POST /auth/setup) and every runner's login curl
-# read from this Secret. Change these before deploying outside your trust
-# boundary — the chart values file is committed to a public repo.
+# Add `helm.sh/resource-policy: keep` to the Namespace, every PVC and every
+# chart-created Secret, so `helm uninstall` never deletes pi-agent state,
+# the Postgres volume or the admin credentials.
+keepOnUninstall: true
+
+# --- Secrets ----------------------------------------------------------------
+# false (default): omnigent-admin and omnigent-postgres already exist in the
+#   namespace and the chart only references them. An upgrade can therefore
+#   never overwrite live credentials with empty or default values.
+# true: render both Secrets from the values below. Every value is guarded by
+#   required(), so there is no silent weak default — `helm template` fails
+#   until you supply one.
+secrets:
+  create: false
+  # Names of the Secrets the workloads read. Used in both modes.
+  adminSecretName: omnigent-admin
+  postgresSecretName: omnigent-postgres
+
+# --- Admin credentials ------------------------------------------------------
+# Only read when secrets.create=true. The setup-admin Job, every runner and
+# the host-gc CronJob always read them from `secrets.adminSecretName`.
 admin:
-  username: woow
-  password: woowtech2026
+  username: ""
+  password: ""
 
 # --- Postgres --------------------------------------------------------------
 postgres:
   image: docker.io/library/postgres:16-alpine
-  # postgres db password — internal only, never published.
-  # DATABASE_URL is derived: postgresql+psycopg://omnigent:<password>@omnigent-postgres:5432/omnigent
-  password: woowtech
+  # Only read when secrets.create=true. DATABASE_URL is derived from it:
+  # postgresql+psycopg://omnigent:<password>@omnigent-postgres:5432/omnigent
+  password: ""
   storage:
     size: 20Gi
     storageClassName: longhorn
     accessModes: [ReadWriteOnce]
+  # Server tuning, passed as `-c key=value` args to the postgres entrypoint in
+  # exactly this order. max_connections must stay above
+  # pgbouncer.maxDbConnections with room for maintenance/superuser sessions;
+  # the stock image default of 100 was the hard ceiling that made any
+  # pgbouncer resizing pointless (see the pgbouncer sizing note below).
+  #
+  # The memory figures below are deliberately small so a fresh install fits on
+  # a modest node. Production overrides them — shared_buffers ~= 1/6 of the
+  # memory limit is the conventional starting point.
+  tuning:
+    maxConnections: 500
+    sharedBuffers: 256MB
+    effectiveCacheSize: 768MB
+    maintenanceWorkMem: 64MB
+    workMem: 4MB
+    maxWorkerProcesses: 8
+    maxParallelWorkers: 8
+    maxParallelWorkersPerGather: 2
+  # Postgres puts parallel-query dynamic shared memory in /dev/shm. The
+  # container runtime default is 64Mi, which can fail large parallel scans, so
+  # the chart mounts a tmpfs of this size at /dev/shm.
+  shmSize: 256Mi
+  # timeoutSeconds is set explicitly everywhere in this chart. Kubernetes
+  # defaults it to 1s, which makes pg_isready flaky under load and can restart
+  # a perfectly healthy database.
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
   resources: {}
 
 # --- pgbouncer (server-pod sidecar) ----------------------------------------
 # Sits inside the omnigent-server pod on 127.0.0.1:6432 and hands the server a
 # connection pool that survives Postgres restarts. Without it, when the
-# omnigent-postgres StatefulSet pod restarts the server's asyncpg pool holds
-# stale broken sockets and takes ~125s (kubelet has to fail liveness enough
-# times to kill and restart the server pod) to recover — measured in
-# Resilience Test 3 on 2026-08-31. With pgbouncer the server reconnects
-# through the pool front-end and target recovery is <30s.
+# omnigent-postgres StatefulSet pod restarts the server's pool holds stale
+# broken sockets and takes ~125s (kubelet has to fail liveness enough times to
+# kill and restart the server pod) to recover — measured in Resilience Test 3
+# on 2026-08-31. With pgbouncer the server reconnects through the pool
+# front-end and target recovery is <30s.
 #
-# Uses `session` pool mode because omnigent's FastAPI stack relies on asyncpg
-# prepared statements — `transaction` / `statement` modes break those. Sizing
-# defaults are conservative for a single-server + 3-runner deployment; tune
-# per-tenant via values overlay.
+# Pool mode is `session`. The rationale recorded here until 2026-09-09
+# ("omnigent's FastAPI stack relies on asyncpg prepared statements") was wrong
+# on both counts: the driver is psycopg3 (`postgresql+psycopg://`), and
+# pgbouncer 1.24.1 defaults to max_prepared_statements=200, which handles
+# protocol-level prepared statements in `transaction` mode. A source audit of
+# omnigent 0.11.0 found no LISTEN/NOTIFY, no advisory locks, no temp tables
+# and no WITH HOLD cursors; the only session-scoped state is
+# `SET LOCAL statement_timeout`, which reverts on commit. `transaction` mode is
+# therefore safe here — we keep `session` as the default because with the
+# sizing below it no longer saturates, and transaction mode would buy nothing
+# at current load.
 #
-# Toggle: set `enabled: false` to revert to a direct
-# `omnigent-postgres:5432` connection (server DATABASE_URL falls back to the
-# Secret). Useful for A/B comparing pool vs. no-pool behaviour.
+# Toggle: `enabled: false` reverts to a direct omnigent-postgres:5432
+# connection (the server reads DATABASE_URL straight from the Secret).
 pgbouncer:
   enabled: true
   # bitnami/pgbouncer moved to bitnamilegacy (free tier) — bitnami/* now
-  # requires the Bitnami Secure Images subscription. Legacy repo still
+  # requires the Bitnami Secure Images subscription. The legacy repo still
   # ships debian-12-suffixed immutable tags.
   image: docker.io/bitnamilegacy/pgbouncer:1.24.1-debian-12-r10
-  # session | transaction | statement — session is the only safe mode for
-  # asyncpg + prepared statements; the other two are here for reference.
+  # session | transaction | statement. See the note above.
   poolMode: session
-  maxClientConn: 100
-  defaultPoolSize: 25
+  # --- Sizing -------------------------------------------------------------
+  # These MUST track the server's SQLAlchemy engine, which is not tunable from
+  # this chart: `omnigent/db/utils.py` hardcodes pool_size=200,
+  # max_overflow=20 (220 connections), deliberately aligned with the AnyIO
+  # thread limiter in `server/app.py` (total_tokens = 200). The app is
+  # *designed* to open up to 220 pooled connections.
+  #
+  # The old defaultPoolSize of 25 was 8x below that ceiling, so in session
+  # mode — where a client connection owns its server connection until it
+  # disconnects — SQLAlchemy's long-lived connections pinned all 25 and the
+  # pool ran permanently full. Symptom chain observed in production on
+  # 2026-09-08/09: SHOW POOLS at sv_active=25 / sv_idle=0 / maxwait=111s, then
+  # psycopg.errors.ProtocolViolation: query_wait_timeout (120s cap) → API
+  # 500s → /health exceeding its probe timeout → liveness SIGKILL of the
+  # server container every ~30 min (exitCode 137, NOT an OOM).
+  #
+  # Chain now aligned: SQLAlchemy 220 max → pgbouncer 200 + 50 reserve
+  # → maxDbConnections 400 → postgres tuning.maxConnections 500.
+  maxClientConn: 1000
+  defaultPoolSize: 200
+  minPoolSize: 10
+  # Reserve pool absorbs short bursts above defaultPoolSize instead of making
+  # clients queue on query_wait_timeout.
+  reservePoolSize: 50
+  reservePoolTimeout: 3
+  # How long a client may wait for a server connection before pgbouncer errors
+  # it out. With the sizing above it should never be reached — if it is, that
+  # is the saturation alarm.
+  queryWaitTimeout: 120
+  # Ceiling across all pools for this database; keeps pgbouncer below
+  # postgres.tuning.maxConnections even if several pools fill at once.
+  maxDbConnections: 400
   serverLifetime: 3600
   serverIdleTimeout: 600
+  probes:
+    readiness:
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
   resources: {}
+  # Extra env for the pgbouncer container, appended after the PGBOUNCER_* vars.
+  # Normally empty — see values/woow-k3s/omnigent.yaml for the one production
+  # entry and why it exists.
+  extraEnv: []
 
 # --- omnigent-server -------------------------------------------------------
 server:
@@ -69,41 +181,61 @@ server:
   # Base URL exposed to browsers — must match the cloudflared ingress hostname.
   baseUrl: https://omnigent.woowtech.io
   # OMNIGENT_AUTH_ENABLED=1 = built-in accounts. Keep this on unless the
-  # deployment is behind a trusted-LAN-only auth layer.
+  # deployment sits behind a trusted-LAN-only auth layer.
   authEnabled: true
-  # Feature flags forwarded via OMNIGENT_FEATURES=. Comma-separated.
-  # omnigent 0.12.0 supports exactly two: usage_page (adds Usage nav +
-  # cost dashboard) and harness_install (enables Set-up-Claude-Code UI).
-  # Unknown flags abort server boot, so keep to this list.
+  # Feature flags forwarded via OMNIGENT_FEATURES=. Comma-separated. omnigent
+  # 0.12.0 supports exactly two: usage_page (Usage nav + cost dashboard) and
+  # harness_install (Set-up-Claude-Code UI). Unknown flags abort server boot.
   features: "usage_page,harness_install"
+  # Session lifetimes. Empty = leave the server's own defaults alone; the env
+  # var is then not rendered at all.
+  accountsSessionTtlHours: ""
+  oidcSessionTtlHours: ""
+  # Extra env for the server container, appended last.
+  extraEnv: []
   storage:
-    # Persistent /data (admin-credentials file, artifacts). Small — server
+    # Persistent /data (admin-credentials file, artifacts). Small — the server
     # rarely writes here.
     size: 5Gi
     storageClassName: longhorn
     accessModes: [ReadWriteOnce]
-  resources: {}
-  # Podman version had this HTTP path issue too — /healthz is shadowed by
-  # the React SPA catch-all and returns HTML 200 even when the API is dead.
-  # /health returns {"status":"ok"} JSON. See docs/plans/2026-08-31-initial-package.md.
+  # Never probe /healthz — it is shadowed by the React SPA catch-all and
+  # returns HTML 200 even when FastAPI is dead. /health returns
+  # {"status":"ok"} JSON only when the API is up.
   healthPath: /health
+  # timeoutSeconds is set explicitly: omitting it lets Kubernetes apply its
+  # 1s default, which is not enough for a health check that queries Postgres.
+  # During the 2026-09-08 pool saturation that 1s timeout is what converted DB
+  # slowness into a liveness SIGKILL loop.
+  probes:
+    readiness:
+      initialDelaySeconds: 15
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 10
+      failureThreshold: 6
+  resources: {}
 
 # --- runner ----------------------------------------------------------------
-# One Deployment per entry; each dials into the server, registers a host,
-# and holds its own pi-agent state on a dedicated Longhorn PVC.
+# One Deployment per entry in `hosts`; each dials into the server, registers a
+# host, and holds its own pi-agent state on a dedicated PVC.
 runner:
   # Published as a multi-arch manifest list by Woow_podman_omnigent_package's
-  # build.yml workflow — the `manifest` job composes the amd64 + arm64 per-arch
-  # images into a single tag without an arch suffix, so the container runtime
-  # picks the right architecture automatically on each node. No need to pick
-  # amd64 vs arm64 in this file anymore. Tag `main` tracks the latest
-  # main-branch build; use `main-<sha>` to pin. Per-arch tags
-  # (`woow-omnigent-runner-amd64:*` / `-arm64:*`) are still published for
-  # audit / rollback if you need to force a specific architecture.
+  # build.yml workflow, so the container runtime picks the right architecture
+  # per node. Tag `main` tracks the latest main build; use `main-<sha>` to pin.
   image: ghcr.io/woowtech/woow-omnigent-runner:main
   imagePullPolicy: Always
-  # Chart provisions one Deployment per name in `hosts`, plus a matching PVC.
-  # Names surface in the omnigent Web UI host picker exactly as written here.
+  # Host names surface in the omnigent Web UI host picker exactly as written.
+  #
+  # Each entry may set `enabled: false` (default true). That renders the PVC
+  # but NOT the Deployment: the host stops running while its pi-agent state is
+  # preserved, and re-enabling it later reattaches the same volume. This is how
+  # the woow-k3s instance is currently configured — see
+  # values/woow-k3s/omnigent.yaml.
   hosts:
     - name: pi1
     - name: pi4
@@ -113,56 +245,109 @@ runner:
     storageClassName: longhorn
     accessModes: [ReadWriteOnce]
   resources: {}
-  # pi CLI env — mirrors runner quadlet.
+  # pi CLI env — mirrors the runner quadlet in the podman sibling.
   piTelemetry: "0"
   piSkipVersionCheck: "1"
+  # The init container waits this many 5s rounds for the admin to be claimed
+  # before failing so the pod restarts. 120 x 5s = 10 min.
+  waitForAdminClaimAttempts: 120
 
-# --- setup-admin Job (post-install hook) ------------------------------------
+# --- setup-admin Job -------------------------------------------------------
+# Claims the first admin account (POST /auth/setup) so `helm install` needs no
+# manual step. Idempotent: a second run sees needs_setup=false and exits 0.
+#
+# NOT a post-install hook, on purpose. Helm 3 runs post-install hooks only
+# after `--wait` reports every resource Ready, while each runner's
+# wait-admin-claim init container blocks until the admin IS claimed. As a hook
+# the two deadlocked: the runners never went Ready, `--wait` timed out after
+# its budget, the release was marked failed and the hook never ran at all.
+# Rendered as an ordinary Job (one per release revision) it is created
+# alongside everything else, so the claim and the runners converge and
+# `helm install --wait` succeeds.
 setupAdmin:
   enabled: true
-  # curl image used by the Job. Pinned so a network hiccup in registry doesn't
-  # break first-run admin claim.
+  # curl image used by the Job and by the wait-admin-claim init container.
+  # Pinned so a registry hiccup cannot break the first-run admin claim.
   image: docker.io/curlimages/curl:8.10.1
+  # Finished Jobs are garbage-collected by the cluster after this many seconds.
+  ttlSecondsAfterFinished: 3600
 
 # --- host-gc CronJob (stale-host cleanup) ----------------------------------
 # Periodic sweep that logs (and, once upstream ships the endpoint, deletes)
-# offline hosts from /v1/hosts. Closes W2-HIGH-3 / K3S-MED-1 from the sibling
-# repos' E2E reports where every runner pod restart leaves an orphan host_id.
+# offline hosts from /v1/hosts.
 #
-# STATUS 2026-08-31: dry-run-only. Upstream API has GET /v1/hosts and
-# GET /v1/hosts/{host_id} but no DELETE. The CronJob logs offline hosts it
-# would have deleted and exits 0. When the DELETE endpoint lands, flip
-# `dryRun: false` and the same job starts pruning. See
-# templates/host-gc-cronjob.yaml for the full endpoint discovery snapshot.
+# STATUS 2026-09-09 (re-verified against omnigent 0.11.0, supersedes the
+# 2026-08-31 note): this CronJob cannot do its job, for three independent
+# reasons. `enabled: false` is the recommended setting.
+#
+#   1. The retention check can never fire. GET /v1/hosts returns exactly
+#      host_id, name, owner, status, sandbox_provider, configured_harnesses
+#      and gateway_inference (server/routes/hosts.py::list_hosts). There is no
+#      last_seen_at field — the script parses one the API has never emitted,
+#      so every host takes the "unparseable last_seen_at" branch and is
+#      skipped. Liveness is computed server-side from hosts.updated_at, which
+#      is not exposed.
+#   2. There is still no DELETE. openapi.json confirms /v1/hosts/{host_id} is
+#      GET-only (host_store.py implements delete_host() but no route exposes
+#      it), so a fixed parser would only ever collect 405s.
+#   3. There is nothing to collect. The hosts table holds real operator
+#      machines; the orphan-host accumulation this job was written for
+#      (W2-HIGH-3 / K3S-MED-1) is not occurring here.
+#
+# The failure mode is not neutral either: with a "working" parser the only row
+# matching "offline > 60m" would be a developer laptop powered off overnight.
 hostGc:
+  # Left true so the chart default does not silently change behaviour on
+  # existing installs. New installs should set this to false.
   enabled: true
   schedule: "0 3 * * *"       # 03:00 UTC daily
   retentionMinutes: 60        # delete hosts offline > this many minutes
   image: docker.io/curlimages/curl:8.10.1
-  dryRun: false               # while upstream lacks DELETE the job gracefully no-ops on 405; flip to true to force log-only
+  # While upstream lacks DELETE the job no-ops on 405; set true to force
+  # log-only.
+  dryRun: false
+  # When a login fails, do not echo the raw HTTP response. A successful login
+  # body carries an admin bearer token, and the failure branch used to print
+  # the whole body to stdout — where any log collector keeps it. Set false to
+  # restore the verbose (token-leaking) message; the woow-k3s instance still
+  # has it false because flipping it rewrites the CronJob args.
+  redactLoginResponseOnFailure: true
+  # The job is a curl + awk one-shot, so it needs almost nothing. Empty by
+  # default; the woow-k3s instance overrides it with the figures a 2026-09-08
+  # `kubectl patch` put on the live CronJob (see values/woow-k3s/omnigent.yaml).
+  resources: {}
 
-# --- cloudflared sidecar ---------------------------------------------------
-# Terminates `omnigent.woowtech.io` at CF edge and tunnels to the in-cluster
-# omnigent-server service. Uses cloudflare-managed config (ingress rules pushed
-# via the CF API); the tunnel-token itself is in the referenced Secret.
+# --- cloudflared -----------------------------------------------------------
+# Terminates the public hostname at the CF edge and tunnels to the in-cluster
+# omnigent-server Service. Runs as its own Deployment (not a sidecar).
+# Cloudflare-managed config: ingress rules are pushed via the CF API, only the
+# tunnel credentials live here.
 cloudflared:
   enabled: true
   image: docker.io/cloudflare/cloudflared:2026.7.3
   replicas: 2
-  # Name of the Secret cloudflared reads (credentials.json + config.yaml).
+  # Name of the Secret cloudflared reads (keys credentials.json + config.yaml).
   # Two ways to populate it:
-  #  (a) `scripts/apply.sh install` (git-clone flow) uses `kubectl create secret`
-  #      to mint it from a local JSON file — see scripts/apply.sh.
-  #  (b) OCI helm install (no git clone) — set `credentials:` below to the JSON
-  #      contents; templates/cloudflared-secret.yaml renders the Secret.
-  #      Enables `helm install oci://… --set-file cloudflared.credentials=creds.json`.
+  #  (a) `scripts/apply.sh install` mints it with `kubectl create secret` from
+  #      a local JSON file.
+  #  (b) OCI install without a git clone: set `credentials` below (usually via
+  #      `--set-file cloudflared.credentials=creds.json`) and
+  #      templates/cloudflared-secret.yaml renders the Secret.
   existingCredentialsSecret: omnigent-cloudflared-creds
-  # OCI install: paste JSON `{AccountTag, TunnelID, TunnelSecret}` here or via
-  # `--set-file cloudflared.credentials=creds.json`. When non-empty, the chart
-  # renders the Secret itself (no separate kubectl step). Leave empty to depend
-  # on an operator-managed Secret named by `existingCredentialsSecret`.
+  # JSON {AccountTag, TunnelID, TunnelSecret}. Leave empty to depend on an
+  # operator-managed Secret named by existingCredentialsSecret.
   credentials: ""
-  # Optional: override TunnelID in the rendered config.yaml. Defaults to
-  # `.TunnelID` parsed out of `credentials` JSON via `fromJson`.
+  # Optional override for the TunnelID in the rendered config.yaml. Defaults
+  # to .TunnelID parsed out of `credentials`.
   tunnelId: ""
+  probes:
+    liveness:
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      timeoutSeconds: 1
+      failureThreshold: 3
   resources: {}
+
+# --- helm test -------------------------------------------------------------
+tests:
+  enabled: true

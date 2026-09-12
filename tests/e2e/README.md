@@ -29,8 +29,8 @@ Environment variables (all optional; defaults are for the k3s prod deployment):
 | var                        | default                                                                 |
 | -------------------------- | ----------------------------------------------------------------------- |
 | `OMNIGENT_BASE_URL`        | `https://omnigent.woowtech.io`                                          |
-| `OMNIGENT_ADMIN_USERNAME`  | `woow`                                                                  |
-| `OMNIGENT_ADMIN_PASSWORD`  | `woowtech2026`                                                          |
+| `OMNIGENT_ADMIN_USERNAME`  | *(required — no default; read it from the `omnigent-admin` Secret)*     |
+| `OMNIGENT_ADMIN_PASSWORD`  | *(required — no default; read it from the `omnigent-admin` Secret)*     |
 | `OMNIGENT_PI_SEEDED`       | *(unset — chat/automation tests skip until set to `1`)*                 |
 
 ## Suites

@@ -1,11 +1,16 @@
 {{- /*
-One Deployment per entry in .Values.runner.hosts, each with a matching PVC.
-The host name flows through to the omnigent Web UI as the registered host
-identifier — pi1, pi4, pi5 become visible in the host picker.
+One PVC per entry in .Values.runner.hosts, plus a Deployment for every entry
+that is not `enabled: false`. The host name flows through to the omnigent Web
+UI as the registered host identifier — pi1, pi4, pi5 appear in the host picker.
 
-State is independent per runner (Longhorn RWO): providers/sessions do NOT
-share across runners or with the co-located pi-agent-N pods. The naming just
-mirrors intent.
+`enabled: false` keeps the PVC and drops the Deployment. That is deliberate:
+the pi-agent state on the volume (providers, sessions, credentials) is
+expensive to rebuild, so parking a host must not destroy it, and re-enabling
+the entry reattaches the same volume.
+
+State is independent per runner (RWO): providers and sessions do NOT share
+across runners or with the co-located pi-agent pods. The naming only mirrors
+intent.
 */ -}}
 {{- range $host := .Values.runner.hosts }}
 ---
@@ -18,12 +23,14 @@ metadata:
     {{- include "omnigent.labels" $ | nindent 4 }}
     app.kubernetes.io/component: runner
     app.kubernetes.io/instance-host: {{ $host.name }}
+  {{- include "omnigent.keepAnnotations" $ | nindent 2 }}
 spec:
   accessModes: {{ $.Values.runner.storage.accessModes | toJson }}
   storageClassName: {{ $.Values.runner.storage.storageClassName | quote }}
   resources:
     requests:
       storage: {{ $.Values.runner.storage.size | quote }}
+{{- if eq (include "omnigent.hostEnabled" $host) "true" }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,10 +57,15 @@ spec:
         app.kubernetes.io/component: runner
         app.kubernetes.io/instance-host: {{ $host.name }}
     spec:
-      # Wait for the setup-admin post-install hook to finish claiming the
-      # admin — otherwise the runner-loop's first /auth/login call races and
-      # falls into `sleep infinity` (upstream design), needing a manual pod
-      # restart. Cheap curl loop against /v1/info until needs_setup=false.
+      # Wait until the admin account is claimed — otherwise the runner loop's
+      # first /auth/login races the claim and falls into `sleep infinity`
+      # (upstream design), needing a manual pod restart.
+      #
+      # The Job that does the claiming is an ordinary resource, not a
+      # post-install hook, precisely so this wait can finish: Helm runs
+      # post-install hooks only after `--wait` reports everything Ready, so as
+      # a hook it deadlocked against this init container. See
+      # templates/setup-admin-job.yaml.
       initContainers:
         - name: wait-admin-claim
           image: {{ $.Values.setupAdmin.image | quote }}
@@ -65,8 +77,8 @@ spec:
               until INFO=$(curl -sS --max-time 3 http://omnigent-server:8000/v1/info 2>/dev/null) && \
                     echo "$INFO" | grep -q '"needs_setup":false'; do
                 i=$((i+1))
-                if [ "$i" -ge 60 ]; then
-                  echo "[wait-admin-claim] admin still unclaimed after 5 min — bailing so pod restarts"
+                if [ "$i" -ge {{ $.Values.runner.waitForAdminClaimAttempts }} ]; then
+                  echo "[wait-admin-claim] admin still unclaimed — bailing so the pod restarts"
                   exit 1
                 fi
                 echo "[wait-admin-claim] admin not claimed yet (attempt $i) — sleep 5s"
@@ -83,12 +95,12 @@ spec:
             - name: OMNIGENT_ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-admin
+                  name: {{ include "omnigent.adminSecretName" $ }}
                   key: OMNIGENT_ADMIN_USERNAME
             - name: OMNIGENT_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-admin
+                  name: {{ include "omnigent.adminSecretName" $ }}
                   key: OMNIGENT_ADMIN_PASSWORD
             - name: OMNIGENT_PI_PATH
               value: /usr/local/bin/pi-code
@@ -110,4 +122,5 @@ spec:
         - name: pi-agent-data
           persistentVolumeClaim:
             claimName: omnigent-runner-{{ $host.name }}-data
+{{- end }}
 {{- end }}

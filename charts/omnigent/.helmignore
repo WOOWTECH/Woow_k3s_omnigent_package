@@ -1,0 +1,15 @@
+# Patterns to ignore when packaging this chart.
+# Never add a bare "secrets.yaml" here or to .gitignore: it also matches
+# templates/secrets.yaml and would silently drop the Secret template.
+.DS_Store
+.git/
+.gitignore
+.github/
+.helmignore
+*.tgz
+*.bak
+*.tmp
+*.swp
+*.orig
+.idea/
+.vscode/

@@ -1,13 +1,18 @@
 {{- /*
-Optional Namespace resource. Off by default because `helm install --namespace X
---create-namespace` is the ergonomic path — turning this on covers the
-"just apply the rendered YAML with kubectl" workflow instead.
+Optional Namespace object. Off by default because `helm install --namespace X
+--create-namespace` is the ergonomic path — turning this on covers the "just
+apply the rendered YAML with kubectl" workflow instead.
+
+A namespace equal to .Release.Namespace is never rendered: it would make
+`helm uninstall` delete the namespace the release lives in, taking every
+PVC with it.
 */ -}}
-{{- if .Values.namespace.create }}
+{{- if and .Values.namespace.create (ne .Values.namespace.name .Release.Namespace) }}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ .Values.namespace.name }}
   labels:
     {{- include "omnigent.labels" . | nindent 4 }}
+  {{- include "omnigent.keepAnnotations" . | nindent 2 }}
 {{- end }}

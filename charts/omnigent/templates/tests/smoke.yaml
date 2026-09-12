@@ -1,35 +1,57 @@
 {{- /*
-`helm test` hook. Runs a curl smoke against the in-cluster server URL.
+`helm test` smoke pod. Read-only: it issues GETs plus one /auth/login, and
+never writes to the database or the API.
 
 Assertions:
-  - /health returns HTTP 200 with body containing "status":"ok"
-  - /v1/info returns accounts_enabled=true and needs_setup=false
-    (i.e. the post-install Job did its thing)
+  - /health returns HTTP 200 with a body containing "status":"ok"
+  - /v1/info reports accounts_enabled=true and needs_setup=false
+    (i.e. the setup-admin Job did its thing)
+  - /auth/login with the admin Secret returns a token, and /v1/hosts answers
 
-Runs as a Pod (not a Job) — that's the shape helm test expects.
+Credentials come from the admin Secret, never from values: the old version
+hard-coded the default username and password into the curl line, which both
+leaked them into every rendered manifest and broke the test the moment the
+password was changed.
+
+Runs as a Pod (not a Job) — that is the shape `helm test` expects.
 */ -}}
+{{- if .Values.tests.enabled }}
 apiVersion: v1
 kind: Pod
 metadata:
-  name: {{ .Release.Name }}-smoke-{{ .Release.Revision }}
+  name: {{ .Release.Name }}-smoke
   namespace: {{ include "omnigent.namespace" . }}
   labels:
     {{- include "omnigent.labels" . | nindent 4 }}
     app.kubernetes.io/component: smoke-test
   annotations:
-    "helm.sh/hook": test
-    "helm.sh/hook-delete-policy": hook-succeeded
+    helm.sh/hook: test
+    # Kept until the next `helm test` so `helm test --logs` can always read it.
+    helm.sh/hook-delete-policy: before-hook-creation
 spec:
   restartPolicy: Never
   containers:
     - name: smoke
       image: {{ .Values.setupAdmin.image | quote }}
+      env:
+        - name: OMNIGENT_ADMIN_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "omnigent.adminSecretName" . }}
+              key: OMNIGENT_ADMIN_USERNAME
+        - name: OMNIGENT_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "omnigent.adminSecretName" . }}
+              key: OMNIGENT_ADMIN_PASSWORD
       command: [/bin/sh, -c]
       args:
         - |
           set -eu
+          SERVER=http://omnigent-server:8000
+
           echo "== /health =="
-          BODY=$(curl -sSf --max-time 5 http://omnigent-server:8000/health)
+          BODY=$(curl -sSf --max-time 5 "${SERVER}/health")
           echo "$BODY"
           case "$BODY" in
             *'"status":"ok"'*) echo "OK: /health returned status:ok" ;;
@@ -37,32 +59,41 @@ spec:
           esac
 
           echo "== /v1/info =="
-          INFO=$(curl -sSf --max-time 5 http://omnigent-server:8000/v1/info)
+          INFO=$(curl -sSf --max-time 5 "${SERVER}/v1/info")
           echo "$INFO"
           case "$INFO" in
             *'"accounts_enabled":true'*) : ;;
             *) echo "FAIL: accounts_enabled != true"; exit 1 ;;
           esac
           case "$INFO" in
-            *'"needs_setup":false'*) echo "OK: needs_setup=false (admin auto-claimed)" ;;
-            *) echo "FAIL: needs_setup should be false after post-install Job"; exit 1 ;;
+            *'"needs_setup":false'*) echo "OK: needs_setup=false (admin claimed)" ;;
+            *) echo "FAIL: needs_setup should be false after the setup-admin Job"; exit 1 ;;
           esac
 
           echo "== /v1/hosts (auth required) =="
-          TOKEN=$(curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
-            --data "{\"username\":\"woow\",\"password\":\"woowtech2026\"}" \
-            http://omnigent-server:8000/auth/login | \
-            sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          json_escape() {
+            printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+          }
+          U=$(json_escape "$OMNIGENT_ADMIN_USERNAME")
+          P=$(json_escape "$OMNIGENT_ADMIN_PASSWORD")
+          LOGIN=$(curl -sS --max-time 10 -X POST -H 'Content-Type: application/json' \
+            --data "{\"username\":\"${U}\",\"password\":\"${P}\"}" \
+            "${SERVER}/auth/login")
+          TOKEN=$(echo "$LOGIN" | sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
           if [ -z "$TOKEN" ]; then
-            echo "FAIL: could not fetch a token — /auth/login returned no token"
+            TOKEN=$(echo "$LOGIN" | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+          fi
+          if [ -z "$TOKEN" ]; then
+            echo "FAIL: /auth/login returned no token (response withheld — it can carry a bearer token)"
             exit 1
           fi
-          HOSTS=$(curl -sSf --max-time 5 -H "Authorization: Bearer $TOKEN" \
-            http://omnigent-server:8000/v1/hosts)
+          echo "OK: /auth/login issued a token"
+          HOSTS=$(curl -sSf --max-time 5 -H "Authorization: Bearer $TOKEN" "${SERVER}/v1/hosts")
           echo "$HOSTS" | head -c 400
           echo
-          # After 30s or so, at least one runner should have registered.
           case "$HOSTS" in
             *'"online":true'*|*'"status":"online"'*) echo "OK: at least one online host" ;;
-            *) echo "WARN: no online host in /v1/hosts yet — runners may still be booting" ;;
+            *) echo "NOTE: no online host in /v1/hosts (expected when every runner.hosts entry is disabled)" ;;
           esac
+          echo "smoke OK"
+{{- end }}

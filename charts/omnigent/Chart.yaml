@@ -3,9 +3,14 @@ name: omnigent
 description: |
   Omnigent 0.11.0 meta-harness on rootless k3s.
 
-  Three deployments: postgres (StatefulSet), the upstream omnigent-server, and
-  N runner replicas each holding their own pi-agent state. Cloudflared sidecar
-  fronts the web UI with a real Let's Encrypt cert.
+  Postgres (StatefulSet), the upstream omnigent-server with a pgbouncer
+  sidecar, and N runner Deployments each holding their own pi-agent state. A
+  separate cloudflared Deployment fronts the web UI with a real Let's Encrypt
+  cert.
+
+  No credentials ship with the chart: secrets.create is false by default and
+  the workloads read existing Secrets. Version stays at 0.1.0 on purpose -
+  helm.sh/chart is a pod-template label here, so bumping it rolls every pod.
 
   Sibling of Woow_podman_omnigent_package — same runner image, same auto-claim
   admin flow, same pi harness bundling. The podman sibling mounts a shared

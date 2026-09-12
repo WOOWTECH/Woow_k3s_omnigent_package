@@ -1,10 +1,26 @@
 {{- if .Values.setupAdmin.enabled -}}
 {{- /*
-Post-install / post-upgrade hook: waits for the server to serve /health, then
-POSTs the admin creds to /auth/setup. Idempotent — returns 409 on subsequent
-runs and we treat that as success.
+Claims the first admin account: waits for the server to serve /health, then
+POSTs the credentials from the admin Secret to /auth/setup. Idempotent — a
+second run sees needs_setup=false (or a 409) and exits 0.
 
-Mirrors the podman sibling's auto-claim block in scripts/install.sh.
+WHY THIS IS NOT A HELM HOOK
+---------------------------
+It used to carry `helm.sh/hook: post-install,post-upgrade`. Helm 3 runs
+post-install hooks only *after* `--wait` reports every resource Ready, while
+each runner's wait-admin-claim init container blocks until the admin IS
+claimed. So `helm install --wait` deadlocked on a fresh install:
+
+  runners never Ready  ->  --wait burns its whole timeout  ->  release marked
+  failed  ->  the post-install hook never runs  ->  admin never claimed.
+
+Live escaped this only because the release predates the init container, so the
+fresh-install path of the current chart had never actually been exercised.
+
+Rendered as an ordinary Job (one per release revision, so upgrades get a fresh
+immutable Job) it is created together with everything else: the claim and the
+runners' wait converge, and `helm install --wait` succeeds. The cluster garbage
+collects the finished Job after setupAdmin.ttlSecondsAfterFinished.
 */ -}}
 apiVersion: batch/v1
 kind: Job
@@ -14,13 +30,10 @@ metadata:
   labels:
     {{- include "omnigent.labels" . | nindent 4 }}
     app.kubernetes.io/component: setup-admin
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 4
-  activeDeadlineSeconds: 300
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: {{ .Values.setupAdmin.ttlSecondsAfterFinished }}
   template:
     metadata:
       labels:
@@ -35,12 +48,12 @@ spec:
             - name: OMNIGENT_ADMIN_USERNAME
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-admin
+                  name: {{ include "omnigent.adminSecretName" . }}
                   key: OMNIGENT_ADMIN_USERNAME
             - name: OMNIGENT_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-admin
+                  name: {{ include "omnigent.adminSecretName" . }}
                   key: OMNIGENT_ADMIN_PASSWORD
           command: [/bin/sh, -c]
           args:
@@ -50,8 +63,8 @@ spec:
               i=0
               until curl -sSf --max-time 3 http://omnigent-server:8000/health >/dev/null 2>&1; do
                 i=$((i+1))
-                if [ "$i" -ge 60 ]; then
-                  echo "[setup-admin] server /health not answering after 5 min — giving up"
+                if [ "$i" -ge 110 ]; then
+                  echo "[setup-admin] server /health not answering — giving up"
                   exit 1
                 fi
                 sleep 5
@@ -67,10 +80,20 @@ spec:
                 exit 0
               fi
 
+              # JSON-escape the credentials instead of interpolating them raw.
+              # A password containing " or \ used to produce invalid JSON, so
+              # the claim failed and the only "safe" passwords were trivial
+              # ones. Escapes backslash first, then the double quote.
+              json_escape() {
+                printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+              }
+              U=$(json_escape "$OMNIGENT_ADMIN_USERNAME")
+              P=$(json_escape "$OMNIGENT_ADMIN_PASSWORD")
+
               echo "[setup-admin] POST /auth/setup as $OMNIGENT_ADMIN_USERNAME"
               CODE=$(curl -sS -o /tmp/resp -w '%{http_code}' \
                 -X POST -H 'Content-Type: application/json' \
-                --data "{\"username\":\"${OMNIGENT_ADMIN_USERNAME}\",\"password\":\"${OMNIGENT_ADMIN_PASSWORD}\"}" \
+                --data "{\"username\":\"${U}\",\"password\":\"${P}\"}" \
                 --max-time 10 http://omnigent-server:8000/auth/setup)
               case "$CODE" in
                 200|201) echo "[setup-admin] admin created" ;;

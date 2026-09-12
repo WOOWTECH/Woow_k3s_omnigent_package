@@ -3,13 +3,7 @@ name: chart
 on:
   push:
     branches: [main]
-    paths:
-      - 'charts/**'
-      - '.github/workflows/chart.yml'
   pull_request:
-    branches: [main]
-    paths:
-      - 'charts/**'
   workflow_dispatch: {}
 
 jobs:
@@ -21,27 +15,125 @@ jobs:
       - name: Setup Helm
         uses: azure/setup-helm@v4
         with:
-          version: v3.15.4
+          version: v3.19.5
 
       - name: helm lint
-        run: helm lint charts/omnigent
+        run: |
+          helm lint charts/omnigent
+          helm lint charts/omnigent -f values/woow-k3s/omnigent.yaml
 
-      - name: helm template (default values)
-        run: helm template omnigent charts/omnigent -f charts/omnigent/values.yaml > /tmp/rendered.yaml
-
-      - name: helm template (with woow overlay)
-        run: helm template omnigent charts/omnigent -f charts/omnigent/values.yaml -f charts/omnigent/values-woow.yaml > /tmp/rendered-woow.yaml
+      - name: helm template (every values combination)
+        run: |
+          S="secrets.create=true,admin.username=dummy,admin.password=dummy-pw,postgres.password=dummy-pg"
+          helm template omnigent charts/omnigent -n omnigent \
+            > /tmp/default.yaml
+          helm template omnigent charts/omnigent -n omnigent \
+            -f values/woow-k3s/omnigent.yaml            > /tmp/woow.yaml
+          helm template omnigent charts/omnigent -n omnigent \
+            --set "$S"                                  > /tmp/secrets.yaml
+          helm template omnigent charts/omnigent -n omnigent \
+            --set "$S" --set namespace.create=true --set namespace.name=omnigent-alt \
+                                                        > /tmp/namespace.yaml
+          helm template omnigent charts/omnigent -n omnigent \
+            --set cloudflared.enabled=false,hostGc.enabled=false,pgbouncer.enabled=false,setupAdmin.enabled=false,tests.enabled=false \
+                                                        > /tmp/minimal.yaml
+          helm template omnigent charts/omnigent -n omnigent \
+            --set-json 'cloudflared.credentials={"AccountTag":"a","TunnelID":"t","TunnelSecret":"s"}' \
+                                                        > /tmp/cf-secret.yaml
 
       - name: Install kubeconform
         run: |
-          curl -sSL "https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz" \
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | tar -xz -C /usr/local/bin kubeconform
           kubeconform -v
 
       - name: kubeconform (schema validation)
-        # skip = CustomResource; strict = require kind+apiVersion; verbose = summary
         run: |
-          for f in /tmp/rendered.yaml /tmp/rendered-woow.yaml; do
-            echo "== $f =="
-            kubeconform -strict -summary -kubernetes-version 1.29.0 "$f"
+          kubeconform -strict -summary -kubernetes-version 1.29.0 \
+            /tmp/default.yaml /tmp/woow.yaml /tmp/secrets.yaml \
+            /tmp/namespace.yaml /tmp/minimal.yaml /tmp/cf-secret.yaml
+
+      - name: Required secrets are enforced
+        run: |
+          for v in admin.username admin.password postgres.password; do
+            if helm template omnigent charts/omnigent --set secrets.create=true \
+                 --set admin.username=x --set admin.password=x --set postgres.password=x \
+                 --set "${v}=" > /dev/null 2>&1; then
+              echo "secrets.create=true rendered with an empty ${v}"; exit 1
+            fi
           done
+          if helm template omnigent charts/omnigent --set secrets.create=true > /dev/null 2>&1; then
+            echo "secrets.create=true rendered without any credential values"; exit 1
+          fi
+          echo "required() guards fire"
+          # Both Secrets must render; catches templates/secrets.yaml going
+          # missing from git (an unanchored .gitignore pattern did exactly that
+          # in the sibling repo).
+          n=$(grep -c '^kind: Secret$' /tmp/secrets.yaml || true)
+          [ "$n" -eq 2 ] || { echo "expected 2 Secrets with secrets.create=true, got $n"; exit 1; }
+          echo "secrets.create=true renders both Secrets"
+
+      - name: Every chart file is tracked by git
+        run: |
+          missing=0
+          while IFS= read -r f; do
+            git ls-files --error-unmatch "$f" >/dev/null 2>&1 || { echo "UNTRACKED: $f"; missing=1; }
+          done < <(find charts -type f)
+          [ "$missing" -eq 0 ] || { echo "a chart file is not in git (check .gitignore anchoring)"; exit 1; }
+          echo "all chart files tracked"
+
+      - name: No secrets committed
+        run: |
+          pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import sys, yaml, pathlib
+          bad = []
+          v = yaml.safe_load(open("charts/omnigent/values.yaml"))
+          for path in (("admin", "username"), ("admin", "password"), ("postgres", "password")):
+              if v[path[0]][path[1]]:
+                  bad.append(f"values.yaml {'.'.join(path)} must be empty")
+          if v["secrets"]["create"]:
+              bad.append("values.yaml secrets.create must default to false")
+          for d in yaml.safe_load_all(open("/tmp/default.yaml")):
+              if d and d.get("kind") == "Secret":
+                  bad.append("default render must not contain Secrets (secrets.create=false)")
+          for d in yaml.safe_load_all(open("/tmp/woow.yaml")):
+              if d and d.get("kind") == "Secret":
+                  bad.append("woow instance render must not contain Secrets")
+          inst = yaml.safe_load(open("values/woow-k3s/omnigent.yaml"))
+          if inst.get("secrets", {}).get("create"):
+              bad.append("instance values must keep secrets.create=false")
+          for k in ("admin", "postgres"):
+              blob = inst.get(k) or {}
+              for f in ("username", "password"):
+                  if blob.get(f):
+                      bad.append(f"instance values must not carry {k}.{f}")
+          for d in yaml.safe_load_all(open("examples/secrets.example.yaml")):
+              for k, val in ((d or {}).get("stringData") or {}).items():
+                  if k not in ("POSTGRES_USER", "POSTGRES_DB") and "REPLACE_ME" not in str(val):
+                      bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
+          # The admin password that used to be committed must stay gone. The
+          # needle is assembled at runtime so this file does not contain it.
+          #
+          # COVERAGE LIMIT, on purpose: only the ADMIN password is scanned. The
+          # Postgres password that was also committed is a substring of the
+          # organisation name, so a literal scan for it matches a dozen
+          # unrelated files and cannot be used as a needle. That credential has
+          # ZERO CI coverage — do not read this step as guarding it. The actual
+          # remedy is rotation (it is on the PR's follow-up list); both
+          # passwords were public and must be treated as disclosed.
+          needle = "woowtech" + "2026"
+          for p in pathlib.Path(".").rglob("*"):
+              if not p.is_file() or ".git/" in str(p):
+                  continue
+              try:
+                  t = p.read_text(encoding="utf-8", errors="ignore")
+              except OSError:
+                  continue
+              if needle in t:
+                  bad.append(f"{p}: the old committed admin password is back")
+          sys.exit("\n".join(bad)) if bad else print("no secrets committed")
+          EOF
+
+      - name: Shell scripts parse
+        run: bash -n scripts/*.sh
