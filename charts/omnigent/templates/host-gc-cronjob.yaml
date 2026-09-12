@@ -39,6 +39,14 @@ live CronJob, which carries the fallback but not the comments.
 RBAC: the pod runs as the dedicated omnigent-host-gc ServiceAccount with
 automountServiceAccountToken: false — it only talks to omnigent-server over
 HTTP and never to the kube-apiserver. See host-gc-rbac.yaml.
+
+RESOURCES: hostGc.resources renders unconditionally, like the four other
+containers in this chart. It exists because the live CronJob carries a
+requests/limits block that was applied with `kubectl patch` on 2026-09-08 —
+same patch wave as the server, Postgres and cloudflared limits — and without a
+values key no instance file could reproduce it. Default {} (which the API
+server stores as `resources: {}` anyway); the live figures are in
+values/woow-k3s/omnigent.yaml.
 */ -}}
 apiVersion: batch/v1
 kind: CronJob
@@ -90,6 +98,8 @@ spec:
                   value: {{ .Values.hostGc.retentionMinutes | quote }}
                 - name: DRY_RUN
                   value: {{ .Values.hostGc.dryRun | quote }}
+              resources:
+                {{- toYaml .Values.hostGc.resources | nindent 16 }}
               command: [/bin/sh, -c]
               args:
                 - |

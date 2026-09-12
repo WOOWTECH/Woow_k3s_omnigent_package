@@ -243,6 +243,12 @@ runner PVCs included — earlier revisions of this chart deleted those) and the
 chart-created Secrets. The Postgres volume is a StatefulSet
 `volumeClaimTemplate`, which Helm never owned in the first place.
 
+One cosmetic leftover: the `helm test` pod `omnigent-smoke` uses
+`hook-delete-policy: before-hook-creation` (so its logs survive a failure and are
+still readable afterwards), which means `helm uninstall` does not remove it. A
+single `Completed` pod stays behind in the namespace; delete it with
+`kubectl -n <ns> delete pod omnigent-smoke` if you want a clean listing.
+
 ## Taking over / upgrading the live release
 
 The live release drifted: settings were applied with `kubectl patch` /
@@ -256,18 +262,50 @@ CONTEXT=woow-k3s scripts/check-drift.sh   # read-only; compares render to live
 
 Check 2 ("repo render vs live objects") must report every object matching field
 for field before you run an upgrade — that is the guarantee that the upgrade
-rolls no pods. Check 1 compares against the *stored* release manifest and is
-expected to differ until the first upgrade lands.
+rolls no pods. It compares in **both** directions: a field the chart declares
+must match live, *and* a field that exists only live must be a known
+API-server default from `SERVER_DEFAULTS` in `scripts/normalize.py`. Anything
+else fails, because a live-only field is exactly what an out-of-band
+`kubectl patch` leaves behind. Check 1 compares against the *stored* release
+manifest and is expected to differ until the first upgrade lands.
 
-One-time step before that first upgrade: the Secrets `omnigent-admin` and
-`omnigent-postgres` are currently owned by the release, and this chart no longer
-renders them (`secrets.create=false`). Annotate them so Helm leaves them alone
-instead of deleting them as removed resources:
+**Do not run `helm get values omnigent`.** Revision 10 was installed from a
+values file that still carried the admin and Postgres passwords, so that command
+prints both in clear text into your terminal and your shell history. Use
+`helm get manifest` or `kubectl get -o yaml` to derive a reference; neither
+exposes a credential. (Rotating those two passwords is a follow-up — until it
+happens, treat `helm get values` on this release as a credential dump.)
+
+### The first upgrade would delete two Secrets — and is blocked until you fix it
+
+Revision 10's stored manifest contains `Secret/omnigent-admin` and
+`Secret/omnigent-postgres` (it was installed with `secrets.create=true`). This
+chart defaults to `secrets.create=false` and renders neither, so a plain
+`helm upgrade` **deletes both** while reporting `STATUS: deployed` — taking the
+admin credentials and the Postgres password/`DATABASE_URL` that the server, the
+runners, the host-gc CronJob and `helm test` all read.
+
+That is not left to memory. `scripts/apply.sh upgrade` runs
+`scripts/preflight-retain.sh` first and refuses to continue; `check-drift.sh`
+reports the same thing read-only. There is no skip flag. Either annotate the two
+Secrets yourself:
 
 ```bash
 kubectl --context woow-k3s -n omnigent annotate secret omnigent-admin omnigent-postgres \
   helm.sh/resource-policy=keep
 ```
+
+or let the preflight do it, which is the same annotation and restarts nothing:
+
+```bash
+CONTEXT=woow-k3s scripts/preflight-retain.sh --fix       # standalone
+RETAIN_FIX=1 KUBECONTEXT=woow-k3s scripts/apply.sh upgrade   # annotate, verify, upgrade
+```
+
+The preflight also lists the three runner Deployments the chart no longer
+renders. They were deleted out of band and are already absent from the cluster,
+so the upgrade simply drops them from the manifest — the PVCs holding their
+pi-agent state are untouched (`runner.hosts[].enabled: false`).
 
 ## Security notes
 

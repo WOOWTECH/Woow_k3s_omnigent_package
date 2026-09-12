@@ -312,6 +312,10 @@ hostGc:
   # restore the verbose (token-leaking) message; the woow-k3s instance still
   # has it false because flipping it rewrites the CronJob args.
   redactLoginResponseOnFailure: true
+  # The job is a curl + awk one-shot, so it needs almost nothing. Empty by
+  # default; the woow-k3s instance overrides it with the figures a 2026-09-08
+  # `kubectl patch` put on the live CronJob (see values/woow-k3s/omnigent.yaml).
+  resources: {}
 
 # --- cloudflared -----------------------------------------------------------
 # Terminates the public hostname at the CF edge and tunnels to the in-cluster

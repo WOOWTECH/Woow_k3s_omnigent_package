@@ -230,6 +230,11 @@ PVC（包含 server 與 runner 的 — 這個 chart 舊版會把它們刪掉）�
 Secret 上加 `helm.sh/resource-policy: keep`。Postgres 那顆是 StatefulSet 的
 `volumeClaimTemplate`，本來就不屬於 Helm。
 
+有一個無害的殘留：`helm test` 的 pod `omnigent-smoke` 用
+`hook-delete-policy: before-hook-creation`（失敗時 log 才留得住），所以
+`helm uninstall` 不會把它刪掉，namespace 裡會留一顆 `Completed` 的 pod。想清乾淨就
+`kubectl -n <ns> delete pod omnigent-smoke`。
+
 ## 接管 / 升級 live release
 
 live release 已經漂移：2026-09-06 與 2026-09-08 用 `kubectl patch` /
@@ -241,17 +246,45 @@ CONTEXT=woow-k3s scripts/check-drift.sh   # 唯讀；比對 render 與 live
 ```
 
 升級前第 2 項檢查（「repo render vs live objects」）必須每個物件都逐欄位相符 —
-那就是「升級不會重啟任何 pod」的保證。第 1 項是跟*已儲存的* release manifest 比，
-在第一次 upgrade 落地之前本來就會有差異。
+那就是「升級不會重啟任何 pod」的保證。它是**雙向**比對：chart 宣告的欄位要跟 live
+一致，而且**只存在於 live 的欄位**必須落在 `scripts/normalize.py` 的
+`SERVER_DEFAULTS` 白名單內，否則就是失敗 — 因為「只有 live 有」正是 out-of-band
+`kubectl patch` 留下的形狀。第 1 項是跟*已儲存的* release manifest 比，在第一次
+upgrade 落地之前本來就會有差異。
 
-第一次 upgrade 之前有一個一次性步驟：Secret `omnigent-admin` 與 `omnigent-postgres`
-目前屬於 release，而這個 chart 不再渲染它們（`secrets.create=false`）。先加註記讓
-Helm 別把它們當成「被移除的資源」刪掉：
+**不要跑 `helm get values omnigent`。** revision 10 當初是用還帶著 admin 與 Postgres
+密碼的 values 檔安裝的，這個指令會把兩組密碼以明文印在終端機與 shell history 裡。要取
+參考基準請用 `helm get manifest` 或 `kubectl get -o yaml`，兩者都不會吐出帳密。（輪替
+這兩組密碼列在 PR 的 follow-up；在那之前，對這個 release 執行 `helm get values` 等同於
+把帳密倒出來。）
+
+### 第一次 upgrade 會刪掉兩顆 Secret — 而且現在會被擋下來
+
+revision 10 的 stored manifest 裡有 `Secret/omnigent-admin` 與
+`Secret/omnigent-postgres`（當初是用 `secrets.create=true` 安裝的）。這個 chart 預設
+`secrets.create=false`、兩顆都不渲染，所以直接 `helm upgrade` 會**把兩顆都刪掉**，而
+Helm 還是回報 `STATUS: deployed` — 連帶把 server、runner、host-gc CronJob 與
+`helm test` 都要讀的 admin 帳密和 Postgres 密碼／`DATABASE_URL` 一起帶走。
+
+這件事不靠人記得。`scripts/apply.sh upgrade` 會先跑
+`scripts/preflight-retain.sh` 並直接拒絕執行；`check-drift.sh` 也會唯讀地報同一件事。
+沒有 skip 參數。要嘛自己下註記：
 
 ```bash
 kubectl --context woow-k3s -n omnigent annotate secret omnigent-admin omnigent-postgres \
   helm.sh/resource-policy=keep
 ```
+
+要嘛讓 preflight 幫你下（同一個註記，不會重啟任何東西）：
+
+```bash
+CONTEXT=woow-k3s scripts/preflight-retain.sh --fix              # 單獨執行
+RETAIN_FIX=1 KUBECONTEXT=woow-k3s scripts/apply.sh upgrade      # 下註記、複查、再升級
+```
+
+preflight 也會列出 chart 不再渲染的三個 runner Deployment。它們早就在 Helm 之外被刪掉、
+叢集上已經不存在，所以 upgrade 只是把它們從 manifest 移除 — 存著 pi-agent state 的 PVC
+不受影響（`runner.hosts[].enabled: false`）。
 
 ## 安全性
 

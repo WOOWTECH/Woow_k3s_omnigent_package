@@ -129,6 +129,17 @@ hostGc:
   # admin bearer token. Flipping this only rewrites CronJob args — no pod
   # restart — but it is still a change to a live object, so it is a follow-up.
   redactLoginResponseOnFailure: false
+  # From the same 2026-09-08 `kubectl patch` wave as the server / Postgres /
+  # cloudflared limits above (managedFields: manager=kubectl-patch,
+  # 2026-09-08T20:49:59Z). Recorded here so the render reproduces the live
+  # CronJob and so a DR rebuild does not silently drop the limits.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
 
 cloudflared:
   enabled: true

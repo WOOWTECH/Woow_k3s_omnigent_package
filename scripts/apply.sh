@@ -13,6 +13,17 @@
 #                 /tmp/omnigent-tunnel-creds.json)
 #   VALUES        instance values file (default: values/woow-k3s/omnigent.yaml)
 #   TIMEOUT       helm --timeout (default: 15m)
+#   RETAIN_FIX    upgrade only: let the retain preflight annotate the objects
+#                 it would otherwise block on (see below)
+#
+# UPGRADE SAFETY: `upgrade` always runs scripts/preflight-retain.sh first and
+# refuses to continue if this render would delete a live, data-bearing object
+# that the stored release manifest still carries. On this release that is
+# Secret/omnigent-admin and Secret/omnigent-postgres — revision 10 was installed
+# with secrets.create=true, the chart now defaults to false, and a plain
+# `helm upgrade` deletes both while reporting STATUS: deployed. There is no skip
+# flag: either annotate them yourself, or re-run with RETAIN_FIX=1 and let the
+# preflight do it. The annotation is additive metadata and restarts nothing.
 #
 # Credentials: the chart does NOT carry admin or Postgres passwords. Either the
 # Secrets omnigent-admin and omnigent-postgres already exist in the namespace
@@ -95,6 +106,21 @@ case "$MODE" in
             --wait --timeout "${TIMEOUT}" "${@:2}"
         ;;
     upgrade)
+        # Unskippable: refuse to delete live data the new render omits.
+        say "retain preflight (scripts/preflight-retain.sh)"
+        PREFLIGHT_ARGS=()
+        [ "${RETAIN_FIX:-0}" = "1" ] && PREFLIGHT_ARGS+=(--fix)
+        CONTEXT="${KUBECONTEXT}" RELEASE="${RELEASE}" NAMESPACE="${NAMESPACE}" \
+        VALUES="${VALUES}" CHART="${CHART_DIR}" \
+            "${REPO_DIR}/scripts/preflight-retain.sh" "${PREFLIGHT_ARGS[@]+"${PREFLIGHT_ARGS[@]}"}" \
+            || die "retain preflight refused the upgrade (see above) — nothing was changed"
+        if [ "${RETAIN_FIX:-0}" = "1" ]; then
+            CONTEXT="${KUBECONTEXT}" RELEASE="${RELEASE}" NAMESPACE="${NAMESPACE}" \
+            VALUES="${VALUES}" CHART="${CHART_DIR}" \
+                "${REPO_DIR}/scripts/preflight-retain.sh" \
+                || die "retain preflight still refuses after --fix — stop and investigate"
+        fi
+
         say "helm upgrade ${RELEASE}"
         helm_ctx upgrade "${RELEASE}" "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \

@@ -114,6 +114,14 @@ jobs:
                       bad.append(f"examples: {d['metadata']['name']}.{k} is not a placeholder")
           # The admin password that used to be committed must stay gone. The
           # needle is assembled at runtime so this file does not contain it.
+          #
+          # COVERAGE LIMIT, on purpose: only the ADMIN password is scanned. The
+          # Postgres password that was also committed is a substring of the
+          # organisation name, so a literal scan for it matches a dozen
+          # unrelated files and cannot be used as a needle. That credential has
+          # ZERO CI coverage — do not read this step as guarding it. The actual
+          # remedy is rotation (it is on the PR's follow-up list); both
+          # passwords were public and must be treated as disclosed.
           needle = "woowtech" + "2026"
           for p in pathlib.Path(".").rglob("*"):
               if not p.is_file() or ".git/" in str(p):
