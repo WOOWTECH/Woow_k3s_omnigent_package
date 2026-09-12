@@ -1,13 +1,26 @@
-# Never commit tunnel credentials or provider keys.
-*.tunnel-creds.json
-*.env
-*.secret.yaml
-.env
-.env.*
+# Real secrets must never be committed — only examples/secrets.example.yaml.
+# These patterns are anchored to the repo root (leading /) on purpose: an
+# unanchored "secrets.yaml" would also match charts/omnigent/templates/secrets.yaml
+# and keep the chart's own Secret template out of git (that exact bug cost the
+# sibling Woow_k3s_litellm repo a release).
+/.env
+/.env.*
+/*.env
+/*.tunnel-creds.json
+/*-tunnel-creds.json
+/secrets.yaml
+/*-secrets.yaml
+/*.secret.yaml
+/*secrets.values.yaml
+/*.local.yaml
+!/charts/omnigent/templates/secrets.yaml
 
 # Helm working dirs
 charts/*/charts/
 charts/*/*.tgz
+*.tgz
+
+# Node / Playwright
 tests/e2e/node_modules/
 tests/e2e/test-results/
 tests/e2e/playwright-report/

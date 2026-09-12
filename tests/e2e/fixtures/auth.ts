@@ -8,12 +8,28 @@ import os from "node:os";
  * authenticated `page`. We stash `storageState` on disk (per-worker) so
  * repeated tests reuse the session cookie instead of hammering /login.
  *
- * Credentials default to the woow-openclaw dev box; override via env:
- *   OMNIGENT_ADMIN_USERNAME / OMNIGENT_ADMIN_PASSWORD.
+ * Credentials come from the environment only — there is deliberately no
+ * fallback. The values that used to sit here were the ones the production
+ * deployment actually uses, in a public repo. Export them from the cluster
+ * Secret before running:
+ *   export OMNIGENT_ADMIN_USERNAME=$(kubectl -n omnigent get secret omnigent-admin \
+ *     -o go-template='{{index .data "OMNIGENT_ADMIN_USERNAME" | base64decode}}')
+ *   export OMNIGENT_ADMIN_PASSWORD=$(kubectl -n omnigent get secret omnigent-admin \
+ *     -o go-template='{{index .data "OMNIGENT_ADMIN_PASSWORD" | base64decode}}')
  */
 
-const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "woow";
-const PASSWORD = process.env.OMNIGENT_ADMIN_PASSWORD ?? "woowtech2026";
+function required(name: string): string {
+  const v = process.env[name];
+  if (!v) {
+    throw new Error(
+      `${name} is not set — export the admin credentials from the omnigent-admin Secret (see tests/e2e/README.md)`,
+    );
+  }
+  return v;
+}
+
+const USERNAME = required("OMNIGENT_ADMIN_USERNAME");
+const PASSWORD = required("OMNIGENT_ADMIN_PASSWORD");
 
 async function performLogin(page: Page): Promise<void> {
   await page.goto("/login");

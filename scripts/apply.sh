@@ -11,6 +11,13 @@
 #   RELEASE       helm release name (default: omnigent)
 #   CF_CREDS_JSON path to cloudflared credentials.json (default:
 #                 /tmp/omnigent-tunnel-creds.json)
+#   VALUES        instance values file (default: values/woow-k3s/omnigent.yaml)
+#   TIMEOUT       helm --timeout (default: 15m)
+#
+# Credentials: the chart does NOT carry admin or Postgres passwords. Either the
+# Secrets omnigent-admin and omnigent-postgres already exist in the namespace
+# (see examples/secrets.example.yaml), or pass --set secrets.create=true plus
+# admin.username / admin.password / postgres.password on a fresh install.
 #
 # The chart's cloudflared sidecar expects a Secret with two keys:
 #   credentials.json — the tunnel creds you got from `cloudflared tunnel create`
@@ -25,6 +32,8 @@ RELEASE="${RELEASE:-omnigent}"
 CF_CREDS_JSON="${CF_CREDS_JSON:-/tmp/omnigent-tunnel-creds.json}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_DIR="${REPO_DIR}/charts/omnigent"
+VALUES="${VALUES:-${REPO_DIR}/values/woow-k3s/omnigent.yaml}"
+TIMEOUT="${TIMEOUT:-15m}"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*"; }
@@ -36,8 +45,7 @@ command -v kubectl >/dev/null || die "kubectl not installed"
 if [ "$MODE" = "render" ]; then
     say "helm template (dry-run)"
     helm template "${RELEASE}" "${CHART_DIR}" \
-        -f "${CHART_DIR}/values.yaml" \
-        -f "${CHART_DIR}/values-woow.yaml" \
+        -f "${VALUES}" \
         --namespace "${NAMESPACE}"
     exit 0
 fi
@@ -83,17 +91,15 @@ case "$MODE" in
         say "helm install ${RELEASE}"
         helm_ctx install "${RELEASE}" "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
-            -f "${CHART_DIR}/values.yaml" \
-            -f "${CHART_DIR}/values-woow.yaml" \
-            --wait --timeout 5m
+            -f "${VALUES}" \
+            --wait --timeout "${TIMEOUT}" "${@:2}"
         ;;
     upgrade)
         say "helm upgrade ${RELEASE}"
         helm_ctx upgrade "${RELEASE}" "${CHART_DIR}" \
             --namespace "${NAMESPACE}" \
-            -f "${CHART_DIR}/values.yaml" \
-            -f "${CHART_DIR}/values-woow.yaml" \
-            --wait --timeout 5m
+            -f "${VALUES}" \
+            --wait --timeout "${TIMEOUT}" "${@:2}"
         ;;
     *)
         die "unknown mode: $MODE (render|install|upgrade)"

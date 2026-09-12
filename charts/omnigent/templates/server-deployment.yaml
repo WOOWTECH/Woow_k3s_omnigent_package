@@ -6,6 +6,7 @@ metadata:
   labels:
     {{- include "omnigent.labels" . | nindent 4 }}
     app.kubernetes.io/component: server
+  {{- include "omnigent.keepAnnotations" . | nindent 2 }}
 spec:
   accessModes: {{ .Values.server.storage.accessModes | toJson }}
   storageClassName: {{ .Values.server.storage.storageClassName | quote }}
@@ -24,9 +25,9 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # Recreate — server holds a listening socket on the shared PVC path and
-    # rolling would attach the new pod before the old released. Longhorn RWO
-    # blocks that. Same call for the runners below.
+    # Recreate — the server holds a listening socket on the shared PVC path and
+    # rolling would attach the new pod before the old one released it. Longhorn
+    # RWO blocks that. Same call for the runners.
     type: Recreate
   selector:
     matchLabels:
@@ -40,23 +41,20 @@ spec:
     spec:
       # WHY the pgbouncer sidecar (when .Values.pgbouncer.enabled is true):
       # ----------------------------------------------------------------------
-      # The omnigent-server holds an asyncpg pool of long-lived Postgres
+      # The omnigent-server holds a SQLAlchemy pool of long-lived Postgres
       # sockets. When the omnigent-postgres StatefulSet pod restarts, those
-      # sockets become half-closed and asyncpg's internal reconnect only
-      # kicks in after several failed queries. In Resilience Test 3
-      # (2026-08-31) this manifested as **~125s of 5xx responses** on
-      # /health while kubelet failed liveness enough times to kill and
-      # restart the server pod itself — recovery required a full server
-      # restart, not just Postgres coming back.
+      # sockets become half-closed and the driver's reconnect only kicks in
+      # after several failed queries. In Resilience Test 3 (2026-08-31) this
+      # manifested as ~125s of 5xx responses on /health while kubelet failed
+      # liveness enough times to kill and restart the server pod itself.
       #
-      # pgbouncer sits at 127.0.0.1:6432 inside this pod. It owns the
-      # backend Postgres sockets; when Postgres flaps, pgbouncer reconnects
+      # pgbouncer sits at 127.0.0.1:6432 inside this pod. It owns the backend
+      # Postgres sockets; when Postgres flaps, pgbouncer reconnects
       # transparently and the server's pool keeps handing out working
-      # client-side connections. Target recovery: <30s (kubelet doesn't
-      # need to restart the server pod at all).
+      # client-side connections. Target recovery: <30s.
       #
-      # Pool mode is `session` because omnigent's SQLAlchemy async engine
-      # relies on prepared statements; `transaction` mode would break them.
+      # Sizing matters as much as presence — see the pgbouncer block in
+      # values.yaml for the 2026-09-08 saturation post-mortem.
       containers:
         - name: server
           image: {{ .Values.server.image | quote }}
@@ -74,13 +72,13 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-postgres
+                  name: {{ include "omnigent.postgresSecretName" . }}
                   key: POSTGRES_PASSWORD
             {{- else }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-postgres
+                  name: {{ include "omnigent.postgresSecretName" . }}
                   key: DATABASE_URL
             {{- end }}
             - name: OMNIGENT_AUTH_ENABLED
@@ -91,29 +89,48 @@ spec:
               value: /data/artifacts
             - name: OMNIGENT_ADMIN_CREDENTIALS_PATH
               value: /data/admin-credentials
+            {{- if .Values.server.accountsSessionTtlHours }}
+            - name: OMNIGENT_ACCOUNTS_SESSION_TTL_HOURS
+              value: {{ .Values.server.accountsSessionTtlHours | quote }}
+            {{- end }}
+            {{- if .Values.server.oidcSessionTtlHours }}
+            - name: OMNIGENT_OIDC_SESSION_TTL_HOURS
+              value: {{ .Values.server.oidcSessionTtlHours | quote }}
+            {{- end }}
             {{- if .Values.server.features }}
             - name: OMNIGENT_FEATURES
               value: {{ .Values.server.features | quote }}
             {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 8000
-          # Never probe /healthz — it's shadowed by the React SPA catch-all
+          # Never probe /healthz — it is shadowed by the React SPA catch-all
           # and returns HTML 200 even when FastAPI is dead. /health returns
           # {"status":"ok"} JSON only when the API is up.
+          #
+          # timeoutSeconds is set explicitly: omitting it lets Kubernetes apply
+          # its 1s default, which is not enough for a health check that queries
+          # Postgres. A slow pool then reads as "dead" and the kubelet restarts
+          # a perfectly healthy server.
           readinessProbe:
             httpGet:
               path: {{ .Values.server.healthPath | quote }}
               port: http
-            initialDelaySeconds: 10
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.server.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.readiness.failureThreshold }}
           livenessProbe:
             httpGet:
               path: {{ .Values.server.healthPath | quote }}
               port: http
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.server.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.server.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.server.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.server.probes.liveness.failureThreshold }}
           volumeMounts:
             - name: server-data
               mountPath: /data
@@ -124,12 +141,16 @@ spec:
           image: {{ .Values.pgbouncer.image | quote }}
           imagePullPolicy: IfNotPresent
           env:
-            # AUTH_TYPE=trust — pgbouncer sits at 127.0.0.1 inside the same
-            # pod as the server; no other container can reach 6432. Trusting
-            # localhost skips SCRAM negotiation which the bitnamilegacy
-            # image doesn't auto-configure with matching hashes for asyncpg.
-            # pgbouncer still authenticates itself against the real Postgres
-            # normally using POSTGRESQL_PASSWORD.
+            # AUTH_TYPE=trust — pgbouncer is only meant to be reached from the
+            # server container over 127.0.0.1, so SCRAM negotiation (which the
+            # bitnamilegacy image does not auto-configure with matching hashes)
+            # is skipped. pgbouncer still authenticates itself against the real
+            # Postgres with POSTGRESQL_PASSWORD.
+            #
+            # CAVEAT: the image binds 0.0.0.0, and 6432 is declared as a
+            # containerPort, so any pod in the cluster that can reach this
+            # pod IP gets an unauthenticated omnigent session. There is no
+            # NetworkPolicy in this chart yet — tracked as a follow-up.
             - name: PGBOUNCER_AUTH_TYPE
               value: trust
             - name: POSTGRESQL_USERNAME
@@ -137,7 +158,7 @@ spec:
             - name: POSTGRESQL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: omnigent-postgres
+                  name: {{ include "omnigent.postgresSecretName" . }}
                   key: POSTGRES_PASSWORD
             - name: POSTGRESQL_HOST
               value: omnigent-postgres
@@ -153,29 +174,49 @@ spec:
               value: {{ .Values.pgbouncer.maxClientConn | quote }}
             - name: PGBOUNCER_DEFAULT_POOL_SIZE
               value: {{ .Values.pgbouncer.defaultPoolSize | quote }}
+            - name: PGBOUNCER_MIN_POOL_SIZE
+              value: {{ .Values.pgbouncer.minPoolSize | quote }}
+            # Reserve pool absorbs short bursts above defaultPoolSize instead
+            # of making clients queue on query_wait_timeout.
+            - name: PGBOUNCER_RESERVE_POOL_SIZE
+              value: {{ .Values.pgbouncer.reservePoolSize | quote }}
+            - name: PGBOUNCER_RESERVE_POOL_TIMEOUT
+              value: {{ .Values.pgbouncer.reservePoolTimeout | quote }}
+            - name: PGBOUNCER_QUERY_WAIT_TIMEOUT
+              value: {{ .Values.pgbouncer.queryWaitTimeout | quote }}
+            # Ceiling across all pools; keeps pgbouncer below
+            # postgres.tuning.maxConnections even if several pools fill at once.
+            - name: PGBOUNCER_MAX_DB_CONNECTIONS
+              value: {{ .Values.pgbouncer.maxDbConnections | quote }}
             - name: PGBOUNCER_SERVER_LIFETIME
               value: {{ .Values.pgbouncer.serverLifetime | quote }}
             - name: PGBOUNCER_SERVER_IDLE_TIMEOUT
               value: {{ .Values.pgbouncer.serverIdleTimeout | quote }}
+            {{- with .Values.pgbouncer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           ports:
-            # No Service — pgbouncer is pod-local; the server container talks
-            # to it via 127.0.0.1 and no other pod should touch it.
+            # No Service — pgbouncer is pod-local; the server container talks to
+            # it via 127.0.0.1.
             - name: pgbouncer
               containerPort: 6432
-          # TCP probe — bitnamilegacy/pgbouncer image doesn't ship pg_isready,
-          # so we test the socket instead. pgbouncer listens on 6432 the
-          # moment the process is up; that's a strong enough liveness signal.
+          # TCP probe — the bitnamilegacy/pgbouncer image does not ship
+          # pg_isready, so we test the socket instead. pgbouncer listens on
+          # 6432 the moment the process is up.
           readinessProbe:
             tcpSocket:
               port: 6432
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            initialDelaySeconds: {{ .Values.pgbouncer.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.pgbouncer.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.pgbouncer.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.pgbouncer.probes.readiness.failureThreshold }}
           livenessProbe:
             tcpSocket:
               port: 6432
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.pgbouncer.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.pgbouncer.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.pgbouncer.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.pgbouncer.probes.liveness.failureThreshold }}
           resources:
             {{- toYaml .Values.pgbouncer.resources | nindent 12 }}
         {{- end }}

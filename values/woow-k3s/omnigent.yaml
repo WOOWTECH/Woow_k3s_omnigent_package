@@ -1,0 +1,145 @@
+# ---------------------------------------------------------------------------
+# Instance values for the LIVE woow-k3s deployment.
+#
+#   context   woow-k3s
+#   release   omnigent
+#   namespace omnigent
+#   URL       https://omnigent.woowtech.io
+#
+#   helm --kube-context woow-k3s upgrade --install omnigent charts/omnigent \
+#     -n omnigent -f values/woow-k3s/omnigent.yaml --wait --timeout 15m
+#
+# This file records what is ACTUALLY RUNNING, including the settings that were
+# applied out of band with `kubectl patch` / `kubectl set env` on 2026-09-06 and
+# 2026-09-08 and were never written back into the chart. Rendering the chart
+# with this file reproduces the live objects field for field, so an upgrade
+# restarts nothing. scripts/check-drift.sh proves it.
+#
+# NO SECRETS HERE. admin / Postgres credentials stay in the cluster Secrets
+# omnigent-admin and omnigent-postgres (secrets.create=false below).
+# ---------------------------------------------------------------------------
+
+namespace:
+  create: false
+  name: omnigent
+
+keepOnUninstall: true
+
+# The two Secrets already exist in the namespace and predate this file. The
+# chart only references them, so an upgrade can never overwrite them and no
+# password has to be committed.
+secrets:
+  create: false
+  adminSecretName: omnigent-admin
+  postgresSecretName: omnigent-postgres
+
+server:
+  baseUrl: https://omnigent.woowtech.io
+  features: "usage_page,harness_install"
+  # Added live with `kubectl set env` on 2026-09-06 (30-day browser sessions so
+  # the operator is not logged out between working days).
+  accountsSessionTtlHours: "720"
+  oidcSessionTtlHours: "720"
+  # From the 2026-09-08 kubectl patch. The server is the only pod on this
+  # cluster that may need to fan out to every runner at once.
+  resources:
+    requests:
+      cpu: "2"
+      memory: 6Gi
+    limits:
+      cpu: "16"
+      memory: 24Gi
+
+pgbouncer:
+  # Sizing from the 2026-09-08 kubectl patch — the fix for the query_wait_timeout
+  # saturation loop. See the post-mortem in charts/omnigent/values.yaml.
+  maxClientConn: 1000
+  defaultPoolSize: 200
+  minPoolSize: 10
+  reservePoolSize: 50
+  reservePoolTimeout: 3
+  queryWaitTimeout: 120
+  maxDbConnections: 400
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+  # `kubectl set env` on 2026-09-06 was run without `-c server`, so
+  # OMNIGENT_FEATURES also landed on the pgbouncer container. pgbouncer ignores
+  # unknown environment variables, so it is a harmless no-op — it is recorded
+  # here only so the chart renders what is actually running. Dropping it is a
+  # one-line change that rewrites the server pod template and therefore needs a
+  # restart window; see the follow-ups in the PR.
+  extraEnv:
+    - name: OMNIGENT_FEATURES
+      value: usage_page,harness_install
+
+postgres:
+  # From the 2026-09-08 kubectl patch: the stock max_connections=100 was the
+  # ceiling that made pgbouncer resizing pointless.
+  tuning:
+    maxConnections: 500
+    sharedBuffers: 4GB
+    effectiveCacheSize: 12GB
+    maintenanceWorkMem: 512MB
+    workMem: 16MB
+    maxWorkerProcesses: 16
+    maxParallelWorkers: 16
+    maxParallelWorkersPerGather: 4
+  shmSize: 2Gi
+  resources:
+    requests:
+      cpu: "2"
+      memory: 8Gi
+    limits:
+      cpu: "16"
+      memory: 24Gi
+
+runner:
+  # All three runner Deployments were deleted out of band (the k3s runners are
+  # not the ones the host picker uses; restarting them interrupts live agent
+  # sessions). The PVCs are deliberately kept: they hold the seeded pi-agent
+  # state, and re-enabling a host reattaches the same volume.
+  #
+  # Before this file existed, a `helm upgrade` from main would have silently
+  # recreated all three Deployments, because they were still in the release
+  # manifest.
+  hosts:
+    - name: pi1
+      enabled: false
+    - name: pi4
+      enabled: false
+    - name: pi5
+      enabled: false
+
+hostGc:
+  # Still enabled live. It cannot actually collect anything (see the hostGc
+  # block in charts/omnigent/values.yaml) but it exits 0, and disabling it
+  # would delete the CronJob — a change for a maintenance window, not for this
+  # write-back.
+  enabled: true
+  schedule: "0 3 * * *"
+  retentionMinutes: 60
+  dryRun: false
+  # false = keep the live CronJob args byte-identical. The chart default (true)
+  # stops the failure branch from echoing a login response that can contain an
+  # admin bearer token. Flipping this only rewrites CronJob args — no pod
+  # restart — but it is still a change to a live object, so it is a follow-up.
+  redactLoginResponseOnFailure: false
+
+cloudflared:
+  enabled: true
+  replicas: 2
+  # Created by scripts/apply.sh with `kubectl create secret`, outside Helm.
+  existingCredentialsSecret: omnigent-cloudflared-creds
+  credentials: ""
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "4"
+      memory: 2Gi

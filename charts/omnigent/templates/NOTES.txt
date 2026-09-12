@@ -1,0 +1,33 @@
+Omnigent {{ .Chart.AppVersion }} — release {{ .Release.Name }} in namespace {{ include "omnigent.namespace" . }}
+
+{{ if .Values.secrets.create -}}
+Secrets omnigent-admin / omnigent-postgres were rendered by this release.
+{{- else -}}
+Secrets are NOT managed by this release (secrets.create=false). These must
+already exist in the namespace:
+  {{ include "omnigent.adminSecretName" . }}     (OMNIGENT_ADMIN_USERNAME, OMNIGENT_ADMIN_PASSWORD)
+  {{ include "omnigent.postgresSecretName" . }}  (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, DATABASE_URL)
+See examples/secrets.example.yaml.
+{{- end }}
+{{- if and .Values.cloudflared.enabled (not .Values.cloudflared.credentials) }}
+  {{ .Values.cloudflared.existingCredentialsSecret }}  (credentials.json, config.yaml)
+{{- end }}
+
+Runner hosts:
+{{- range $host := .Values.runner.hosts }}
+  {{ $host.name }}: {{ if eq (include "omnigent.hostEnabled" $host) "true" }}Deployment + PVC{{ else }}PVC only (parked; state preserved){{ end }}
+{{- end }}
+
+Wait for first boot and verify:
+  kubectl -n {{ include "omnigent.namespace" . }} rollout status deploy/omnigent-server --timeout=10m
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if .Values.cloudflared.enabled }}
+  curl -s {{ .Values.server.baseUrl }}/health
+{{- else }}
+
+cloudflared is disabled: the server is only reachable in-cluster at
+  http://omnigent-server.{{ include "omnigent.namespace" . }}.svc.cluster.local:8000
+{{- end }}
+
+`helm uninstall` keeps the Namespace, every PVC and the chart-created Secrets
+{{- if .Values.keepOnUninstall }} (keepOnUninstall=true){{ else }} — WARNING: keepOnUninstall=false, uninstall WILL delete PVCs and Secrets{{ end }}.

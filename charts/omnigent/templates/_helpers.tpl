@@ -1,5 +1,11 @@
 {{/*
-Standard Helm helper templates for the omnigent chart.
+Helper templates for the omnigent chart.
+
+Resource names, selectors and pod-template labels are fixed (not derived from
+the release name) on purpose: the Cloudflare tunnel and every in-cluster URL
+(omnigent-server:8000, omnigent-postgres:5432) point at these exact names, and
+changing a selector or a pod-template label would restart every pod. One
+release per namespace is therefore the supported model.
 */}}
 
 {{- define "omnigent.name" -}}
@@ -31,8 +37,44 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" }}
 {{- end -}}
 
 {{/*
-Postgres DATABASE_URL — kept in one place so server + Job + smoke test agree.
+`annotations:` block carrying the keep policy, or nothing at all. Used on the
+Namespace, every PVC and every chart-created Secret so `helm uninstall` cannot
+delete pi-agent state, the Postgres volume or the admin credentials.
+*/}}
+{{- define "omnigent.keepAnnotations" -}}
+{{- if .Values.keepOnUninstall -}}
+annotations:
+  helm.sh/resource-policy: keep
+{{- end -}}
+{{- end -}}
+
+{{/* Secret names — the same in both secrets.create modes. */}}
+{{- define "omnigent.adminSecretName" -}}
+{{ .Values.secrets.adminSecretName }}
+{{- end -}}
+
+{{- define "omnigent.postgresSecretName" -}}
+{{ .Values.secrets.postgresSecretName }}
+{{- end -}}
+
+{{/*
+Postgres DATABASE_URL — kept in one place so the Secret and any consumer agree.
+Only reachable with secrets.create=true; otherwise the value already lives in
+the existing Secret's DATABASE_URL key.
 */}}
 {{- define "omnigent.databaseUrl" -}}
-postgresql+psycopg://omnigent:{{ .Values.postgres.password }}@omnigent-postgres:5432/omnigent
+postgresql+psycopg://omnigent:{{ required "postgres.password is required when secrets.create=true" .Values.postgres.password }}@omnigent-postgres:5432/omnigent
+{{- end -}}
+
+{{/*
+Is this runner host enabled? Missing key means true; `enabled: false` renders
+the PVC but not the Deployment.
+*/}}
+{{- define "omnigent.hostEnabled" -}}
+{{- $host := . -}}
+{{- if hasKey $host "enabled" -}}
+{{- $host.enabled -}}
+{{- else -}}
+true
+{{- end -}}
 {{- end -}}

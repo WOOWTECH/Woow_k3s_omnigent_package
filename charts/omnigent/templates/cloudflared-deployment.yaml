@@ -1,6 +1,7 @@
 {{- if .Values.cloudflared.enabled -}}
 {{- /*
-Cloudflared sidecar Deployment — terminates a public HTTPS endpoint at CF edge
+Cloudflared Deployment (its own Deployment, not a sidecar) — terminates a
+public HTTPS endpoint at the CF edge
 and tunnels traffic to omnigent-server. The tunnel is cloudflare-managed
 (ingress rules live in CF, not in a local yaml), so we only need credentials
 here. Rules are seeded once via `scripts/apply.sh` (or the CF dashboard).
@@ -45,9 +46,10 @@ spec:
               # cloudflared exposes a metrics endpoint on 2000 by default.
               path: /ready
               port: 2000
-            initialDelaySeconds: 10
-            periodSeconds: 20
-            failureThreshold: 3
+            initialDelaySeconds: {{ .Values.cloudflared.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.cloudflared.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.cloudflared.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.cloudflared.probes.liveness.failureThreshold }}
           resources:
             {{- toYaml .Values.cloudflared.resources | nindent 12 }}
       volumes:

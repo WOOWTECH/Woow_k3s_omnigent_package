@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Uninstall the omnigent release from a k3s cluster.
 #
-#   scripts/uninstall.sh              # helm uninstall; keep PVCs & Secret
-#   scripts/uninstall.sh --purge      # also delete PVCs (pi state loss) and the CF creds Secret
+#   scripts/uninstall.sh              # helm uninstall; keeps the namespace,
+#                                     # every PVC and the chart-created Secrets
+#                                     # (keepOnUninstall=true adds
+#                                     #  helm.sh/resource-policy: keep to them)
+#   scripts/uninstall.sh --purge      # also delete PVCs (pi-agent + Postgres +
+#                                     # server state loss), the CF creds Secret
+#                                     # and the namespace
 set -euo pipefail
 
 NAMESPACE="${NAMESPACE:-omnigent}"

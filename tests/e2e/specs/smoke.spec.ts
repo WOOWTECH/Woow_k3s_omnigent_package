@@ -5,8 +5,9 @@ import { test, expect } from "@playwright/test";
  * (health endpoints, login page render).
  */
 
-const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "woow";
-const PASSWORD = process.env.OMNIGENT_ADMIN_PASSWORD ?? "woowtech2026";
+// No fallbacks: credentials come from the environment (see tests/e2e/README.md).
+const USERNAME = process.env.OMNIGENT_ADMIN_USERNAME ?? "";
+const PASSWORD = process.env.OMNIGENT_ADMIN_PASSWORD ?? "";
 
 test("smoke: /healthz returns 200 @known-issue omnigent-server-healthcheck-shadowed", async ({
   request,
