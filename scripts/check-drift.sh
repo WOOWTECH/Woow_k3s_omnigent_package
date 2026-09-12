@@ -11,9 +11,16 @@
 # installed from a values file that still carried the admin and Postgres
 # passwords, so that command prints both in clear text into your terminal and
 # your shell history. Use `helm get manifest` (check 1) or `kubectl get -o yaml`
-# (check 2) — neither exposes a credential. Rotating those passwords is on the
-# PR's follow-up list; until then treat `helm get values` on this release as a
-# credential dump.
+# (check 2) instead. Check 2 never sees a credential because this chart does
+# not render Secret objects at all (secrets.create=false). Check 1 is the
+# risky one: the STORED release manifest for revision 10 still bakes
+# Secret/omnigent-admin and Secret/omnigent-postgres in as plaintext
+# stringData (that predates this PR's secret removal), so this script drops
+# every `kind: Secret` document from both sides before diffing them — the
+# diff never contains a stringData/data value. Rotating those passwords is on
+# the PR's follow-up list; until then treat `helm get values` or `helm get
+# manifest` run BY HAND (outside this script) on this release as a credential
+# dump.
 #
 #   CONTEXT=woow-k3s RELEASE=omnigent NAMESPACE=omnigent \
 #     VALUES=values/woow-k3s/omnigent.yaml scripts/check-drift.sh
@@ -40,15 +47,31 @@ command -v python3 >/dev/null || { echo "python3 not installed"; exit 2; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Drops every `kind: Secret` document from a multi-doc manifest. Used only on
+# check 1's inputs, so a stored release manifest that still bakes in
+# Secret/omnigent-admin or Secret/omnigent-postgres (pre-dating this PR's
+# secret removal) can never put a credential into the diff below.
+strip_secrets() {
+  python3 - "$1" "$2" <<'PY'
+import sys, yaml
+src, dst = sys.argv[1], sys.argv[2]
+with open(src) as f:
+    docs = [d for d in yaml.safe_load_all(f) if d and d.get("kind") != "Secret"]
+with open(dst, "w") as f:
+    yaml.safe_dump_all(docs, f, default_flow_style=False, sort_keys=False)
+PY
+}
+
 helm template "$RELEASE" charts/omnigent -n "$NAMESPACE" -f "$VALUES" --skip-tests "$@" > "$tmp/repo.yaml"
 
 rc=0
 
-echo "== 1. repo render vs stored release manifest =="
+echo "== 1. repo render vs stored release manifest (Secret objects excluded) =="
 if helm --kube-context "$CONTEXT" get manifest "$RELEASE" -n "$NAMESPACE" > "$tmp/release.yaml" 2>/dev/null; then
-  # -B: `helm get manifest` ends with a blank line that `helm template` does not.
-  if diff -u -B "$tmp/release.yaml" "$tmp/repo.yaml" > "$tmp/repo.diff"; then
-    echo "   repo == release $RELEASE"
+  strip_secrets "$tmp/release.yaml" "$tmp/release.nosecret.yaml"
+  strip_secrets "$tmp/repo.yaml" "$tmp/repo.nosecret.yaml"
+  if diff -u "$tmp/release.nosecret.yaml" "$tmp/repo.nosecret.yaml" > "$tmp/repo.diff"; then
+    echo "   repo == release $RELEASE (excluding Secret objects)"
   else
     echo "   differs from the stored manifest (expected before the first upgrade):"
     sed -n '1,80p' "$tmp/repo.diff"
