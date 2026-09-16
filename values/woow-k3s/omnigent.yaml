@@ -34,6 +34,8 @@ secrets:
   postgresSecretName: omnigent-postgres
 
 server:
+  image: ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada76a34857e297f12d2a82b0cfb12ca03755df31c40d1d30bd37a3730e
+  imagePullPolicy: IfNotPresent
   baseUrl: https://omnigent.woowtech.io
   features: "usage_page,harness_install"
   # Added live with `kubectl set env` on 2026-09-06 (30-day browser sessions so
@@ -67,16 +69,6 @@ pgbouncer:
     limits:
       cpu: "4"
       memory: 4Gi
-  # `kubectl set env` on 2026-09-06 was run without `-c server`, so
-  # OMNIGENT_FEATURES also landed on the pgbouncer container. pgbouncer ignores
-  # unknown environment variables, so it is a harmless no-op — it is recorded
-  # here only so the chart renders what is actually running. Dropping it is a
-  # one-line change that rewrites the server pod template and therefore needs a
-  # restart window; see the follow-ups in the PR.
-  extraEnv:
-    - name: OMNIGENT_FEATURES
-      value: usage_page,harness_install
-
 postgres:
   # From the 2026-09-08 kubectl patch: the stock max_connections=100 was the
   # ceiling that made pgbouncer resizing pointless.
@@ -116,19 +108,12 @@ runner:
       enabled: false
 
 hostGc:
-  # Still enabled live. It cannot actually collect anything (see the hostGc
-  # block in charts/omnigent/values.yaml) but it exits 0, and disabling it
-  # would delete the CronJob — a change for a maintenance window, not for this
-  # write-back.
-  enabled: true
+  # Disabled because the current API exposes neither last_seen_at nor DELETE;
+  # see the hostGc block in charts/omnigent/values.yaml.
+  enabled: false
   schedule: "0 3 * * *"
   retentionMinutes: 60
   dryRun: false
-  # false = keep the live CronJob args byte-identical. The chart default (true)
-  # stops the failure branch from echoing a login response that can contain an
-  # admin bearer token. Flipping this only rewrites CronJob args — no pod
-  # restart — but it is still a change to a live object, so it is a follow-up.
-  redactLoginResponseOnFailure: false
   # From the same 2026-09-08 `kubectl patch` wave as the server / Postgres /
   # cloudflared limits above (managedFields: manager=kubectl-patch,
   # 2026-09-08T20:49:59Z). Recorded here so the render reproduces the live

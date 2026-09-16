@@ -23,7 +23,8 @@ metadata:
     {{- include "omnigent.labels" . | nindent 4 }}
     app.kubernetes.io/component: server
 spec:
-  replicas: 1
+  replicas: {{ .Values.server.replicas }}
+  progressDeadlineSeconds: 1200
   strategy:
     # Recreate — the server holds a listening socket on the shared PVC path and
     # rolling would attach the new pod before the old one released it. Longhorn
@@ -31,12 +32,14 @@ spec:
     type: Recreate
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "omnigent.name" . }}
+      {{- include "omnigent.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: server
   template:
     metadata:
       labels:
-        {{- include "omnigent.labels" . | nindent 8 }}
+        {{- include "omnigent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
         app.kubernetes.io/component: server
     spec:
       # WHY the pgbouncer sidecar (when .Values.pgbouncer.enabled is true):
@@ -115,6 +118,13 @@ spec:
           # its 1s default, which is not enough for a health check that queries
           # Postgres. A slow pool then reads as "dead" and the kubelet restarts
           # a perfectly healthy server.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 90
           readinessProbe:
             httpGet:
               path: {{ .Values.server.healthPath | quote }}
@@ -240,5 +250,5 @@ spec:
       port: 8000
       targetPort: http
   selector:
-    app.kubernetes.io/name: {{ include "omnigent.name" . }}
+    {{- include "omnigent.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: server

@@ -24,7 +24,7 @@ chart with it reproduces the live objects field for field, and
 | | |
 |---|---|
 | **Public URL** | Whatever you configure via cloudflared (default: `https://omnigent.woowtech.io`) |
-| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:latest` |
+| **Server** | Upstream `ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada…` |
 | **Runners** | `ghcr.io/woowtech/woow-omnigent-runner:main` — multi-arch manifest list (amd64 + arm64) built by the podman sibling's CI; one Deployment per host name (`pi1`, `pi4`, `pi5` by default) |
 | **Database** | PostgreSQL 16-alpine as a StatefulSet, RWO Longhorn PVC |
 | **Auth** | Built-in accounts; admin auto-claimed by the setup-admin Job. No credentials ship in the chart — `secrets.create=false` by default |
@@ -313,7 +313,7 @@ pi-agent state are untouched (`runner.hosts[].enabled: false`).
 - **Cloudflared tunnel creds live in a Secret named `omnigent-cloudflared-creds`** — `scripts/apply.sh` mints it from `CF_CREDS_JSON`. Never commit the JSON.
 - **pgbouncer runs with `AUTH_TYPE=trust`** and declares `containerPort: 6432`, and the image binds `0.0.0.0`. Any pod that can reach the server pod IP gets an unauthenticated `omnigent` database session, because the namespace has no NetworkPolicy. Restricting this needs a NetworkPolicy (not yet in this chart).
 - **No pod sets a `securityContext`** — no `runAsNonRoot`, no `readOnlyRootFilesystem`, no dropped capabilities.
-- **Floating image tags.** `omnigent-server:latest` and `woow-omnigent-runner:main` with `imagePullPolicy: Always`, and the chart version never moves off `0.1.0`, so a deployment is not reproducible from the release record alone.
+- **Floating image tags.** `omnigent-server` no longer floats: it is pinned to `v0.12.0@sha256:caa84ada…` with `imagePullPolicy: IfNotPresent`, so a Helm release reproduces the reviewed server image. `woow-omnigent-runner:main` still floats with `imagePullPolicy: Always`; pin it to a `main-<sha>` tag when runner reproducibility is required.
 - **Postgres RWO PVC** — data loss on delete-pvc without a Longhorn snapshot.
 - **Runner-per-PVC design** means N × 20Gi Longhorn volumes. Tune `runner.storage.size` if pi state is small, or park a host with `enabled: false` to keep its volume without running it.
 

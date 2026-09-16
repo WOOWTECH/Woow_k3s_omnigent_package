@@ -176,8 +176,9 @@ pgbouncer:
 
 # --- omnigent-server -------------------------------------------------------
 server:
-  image: ghcr.io/omnigent-ai/omnigent-server:latest
-  imagePullPolicy: Always
+  image: ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada76a34857e297f12d2a82b0cfb12ca03755df31c40d1d30bd37a3730e
+  imagePullPolicy: IfNotPresent
+  replicas: 1
   # Base URL exposed to browsers — must match the cloudflared ingress hostname.
   baseUrl: https://omnigent.woowtech.io
   # OMNIGENT_AUTH_ENABLED=1 = built-in accounts. Keep this on unless the
