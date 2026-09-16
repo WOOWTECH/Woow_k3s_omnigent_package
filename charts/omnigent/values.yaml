@@ -176,7 +176,7 @@ pgbouncer:
 
 # --- omnigent-server -------------------------------------------------------
 server:
-  image: ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada76a34857e297f12d2a82b0cfb12ca03755df31c40d1d30bd37a3730e
+  image: ghcr.io/omnigent-ai/omnigent-server:v0.14.0@sha256:9a964b9eb9c60122faf4f1fbbcd8e4284029978467dd3056871828c5df5e042f
   imagePullPolicy: IfNotPresent
   replicas: 1
   # Base URL exposed to browsers — must match the cloudflared ingress hostname.
@@ -185,8 +185,9 @@ server:
   # deployment sits behind a trusted-LAN-only auth layer.
   authEnabled: true
   # Feature flags forwarded via OMNIGENT_FEATURES=. Comma-separated. omnigent
-  # 0.12.0 supports exactly two: usage_page (Usage nav + cost dashboard) and
-  # harness_install (Set-up-Claude-Code UI). Unknown flags abort server boot.
+  # 0.14.0 accepts exactly usage_page, harness_install, and canvas (upstream
+  # omnigent/server/feature_flags.py:20-25). Unknown flags abort server boot.
+  # Remove canvas before rolling the server image back to v0.12.0.
   features: "usage_page,harness_install"
   # Session lifetimes. Empty = leave the server's own defaults alone; the env
   # var is then not rendered at all.
