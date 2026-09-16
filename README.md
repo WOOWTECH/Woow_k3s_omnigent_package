@@ -167,6 +167,7 @@ scripts/
 tests/e2e/                     # Playwright suite (adapted from podman sibling)
 docs/
   plans/2026-08-31-initial-package.md
+  plans/2026-09-16-upgrade-0.14.0-runbook.md  # production upgrade / rollback
   tests/                       # populated by e2e passes
 .github/workflows/
   chart.yml                    # lint, template every combination, kubeconform, secret guards
@@ -250,6 +251,10 @@ single `Completed` pod stays behind in the namespace; delete it with
 `kubectl -n <ns> delete pod omnigent-smoke` if you want a clean listing.
 
 ## Taking over / upgrading the live release
+
+For the v0.14.0 production maintenance window, backups, go/no-go gates and both
+rollback paths are defined in the
+[upgrade / rollback runbook](docs/plans/2026-09-16-upgrade-0.14.0-runbook.md).
 
 The live release drifted: settings were applied with `kubectl patch` /
 `kubectl set env` on 2026-09-06 and 2026-09-08 and were never written back, and

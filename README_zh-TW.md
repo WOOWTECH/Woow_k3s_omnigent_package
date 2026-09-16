@@ -158,6 +158,7 @@ scripts/
 tests/e2e/                     # Playwright suite（從 podman 姊妹 port 過來）
 docs/
   plans/2026-08-31-initial-package.md
+  plans/2026-09-16-upgrade-0.14.0-runbook.md  # production 升級／rollback
   tests/                       # e2e pass 產出放這
 .github/workflows/
   chart.yml                    # lint、render 每種 values 組合、kubeconform、secret 檢查
@@ -236,6 +237,9 @@ Secret 上加 `helm.sh/resource-policy: keep`。Postgres 那顆是 StatefulSet �
 `kubectl -n <ns> delete pod omnigent-smoke`。
 
 ## 接管 / 升級 live release
+
+v0.14.0 production 維護窗口的備份、go/no-go 門檻與兩條 rollback 路徑，統一以
+[升級／rollback runbook](docs/plans/2026-09-16-upgrade-0.14.0-runbook.md) 為準。
 
 live release 已經漂移：2026-09-06 與 2026-09-08 用 `kubectl patch` /
 `kubectl set env` 改過設定但沒寫回 repo，三個 runner Deployment 也在 Helm 之外被刪掉。
