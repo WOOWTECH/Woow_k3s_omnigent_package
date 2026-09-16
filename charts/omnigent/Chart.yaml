@@ -1,7 +1,7 @@
 apiVersion: v2
 name: omnigent
 description: |
-  Omnigent 0.11.0 meta-harness on rootless k3s.
+  Omnigent 0.14.0 meta-harness on rootless k3s.
 
   Postgres (StatefulSet), the upstream omnigent-server with a pgbouncer
   sidecar, and N runner Deployments each holding their own pi-agent state. A
@@ -9,9 +9,9 @@ description: |
   cert.
 
   No credentials ship with the chart: secrets.create is false by default and
-  the workloads read existing Secrets. Version remains at 0.1.0 for this
-  hardening phase; version labels are object metadata only, so later chart
-  version bumps do not roll every pod.
+  the workloads read existing Secrets. Chart version 0.2.0 packages the
+  omnigent-server v0.14.0 upgrade; version labels remain object metadata only,
+  so chart version bumps do not roll every pod.
 
   Sibling of Woow_podman_omnigent_package — same runner image, same auto-claim
   admin flow, same pi harness bundling. The podman sibling mounts a shared
@@ -19,8 +19,8 @@ description: |
   because pi-agent's PVCs are RWO and can't be co-mounted with the live
   pi-agent pods.
 type: application
-version: 0.1.0
-appVersion: "0.11.0"
+version: 0.2.0
+appVersion: "0.14.0"
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/WOOWTECH/Woow_k3s_omnigent_package
 sources:

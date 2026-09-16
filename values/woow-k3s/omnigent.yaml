@@ -34,7 +34,7 @@ secrets:
   postgresSecretName: omnigent-postgres
 
 server:
-  image: ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada76a34857e297f12d2a82b0cfb12ca03755df31c40d1d30bd37a3730e
+  image: ghcr.io/omnigent-ai/omnigent-server:v0.14.0@sha256:9a964b9eb9c60122faf4f1fbbcd8e4284029978467dd3056871828c5df5e042f
   imagePullPolicy: IfNotPresent
   baseUrl: https://omnigent.woowtech.io
   features: "usage_page,harness_install"

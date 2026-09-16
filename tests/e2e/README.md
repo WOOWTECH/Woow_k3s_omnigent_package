@@ -1,6 +1,6 @@
-# Omnigent 0.11.0 Web UI — Playwright E2E (k3s)
+# Omnigent 0.14.0 Web UI — Playwright E2E (k3s)
 
-Self-contained Playwright + TypeScript E2E suite for the Omnigent 0.11.0 Web UI
+Self-contained Playwright + TypeScript E2E suite for the Omnigent 0.14.0 Web UI
 served by the `Woow_k3s_omnigent_package` Helm chart, fronted by cloudflared at
 `https://omnigent.woowtech.io`.
 
