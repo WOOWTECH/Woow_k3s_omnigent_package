@@ -11,12 +11,14 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: {{ include "omnigent.name" . }}
+      {{- include "omnigent.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: postgres
   template:
     metadata:
       labels:
-        {{- include "omnigent.labels" . | nindent 8 }}
+        {{- include "omnigent.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/managed-by: {{ .Release.Service }}
         app.kubernetes.io/component: postgres
     spec:
       containers:
@@ -113,5 +115,5 @@ spec:
       port: 5432
       targetPort: pg
   selector:
-    app.kubernetes.io/name: {{ include "omnigent.name" . }}
+    {{- include "omnigent.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: postgres

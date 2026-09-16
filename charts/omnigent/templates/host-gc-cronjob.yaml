@@ -74,7 +74,9 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "omnigent.labels" . | nindent 12 }}
+            {{- include "omnigent.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/managed-by: {{ .Release.Service }}
             app.kubernetes.io/component: host-gc
         spec:
           restartPolicy: Never

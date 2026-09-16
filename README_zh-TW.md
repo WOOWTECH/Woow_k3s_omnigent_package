@@ -21,7 +21,7 @@ admin，所以 tunnel 憑證到位之後 `helm install` 不需要額外手動步
 | | |
 |---|---|
 | **對外 URL** | Cloudflared 設什麼就是什麼（預設 `https://omnigent.woowtech.io`） |
-| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:latest` |
+| **Server** | 上游 `ghcr.io/omnigent-ai/omnigent-server:v0.12.0@sha256:caa84ada…` |
 | **Runners** | `ghcr.io/woowtech/woow-omnigent-runner:main` — 多架構 manifest list（amd64 + arm64），podman 姊妹的 CI 產出；每個 host 名字（預設 `pi1`/`pi4`/`pi5`）一個 Deployment |
 | **Database** | PostgreSQL 16-alpine StatefulSet，RWO Longhorn PVC |
 | **Auth** | 上游 built-in accounts；admin 由 setup-admin Job 自動 claim。chart 內不含任何帳密，預設 `secrets.create=false` |
@@ -292,7 +292,7 @@ preflight 也會列出 chart 不再渲染的三個 runner Deployment。它們早
 - **Cloudflared tunnel creds 存在名為 `omnigent-cloudflared-creds` 的 Secret** — `scripts/apply.sh` 從 `CF_CREDS_JSON` 自動建。JSON 絕不 commit
 - **pgbouncer 用 `AUTH_TYPE=trust`** 而且宣告了 `containerPort: 6432`，image 又綁在 `0.0.0.0`。namespace 沒有任何 NetworkPolicy，所以叢集內任何能連到 server pod IP 的 pod 都能免密碼拿到 `omnigent` 的資料庫連線。要收掉得加 NetworkPolicy（這個 chart 還沒有）
 - **所有 Pod 都沒有 `securityContext`** — 沒有 `runAsNonRoot`、`readOnlyRootFilesystem`，也沒有 drop capabilities
-- **浮動 image tag。** `omnigent-server:latest` 與 `woow-omnigent-runner:main` 配 `imagePullPolicy: Always`，chart 版號又一直停在 `0.1.0`，光看 release 記錄無法重現一次部署
+- **浮動 image tag。** `omnigent-server` 已不再浮動：目前釘在 `v0.12.0@sha256:caa84ada…`，並使用 `imagePullPolicy: IfNotPresent`，因此 Helm release 能重現覆核過的 server image。`woow-omnigent-runner:main` 仍搭配 `imagePullPolicy: Always` 浮動；需要重現 runner 時應改釘 `main-<sha>` tag
 - **Postgres RWO PVC** — 沒 Longhorn snapshot 就 delete-pvc 會掉資料
 - **Runner-per-PVC 設計** = N × 20Gi Longhorn volume。pi state 小可調 `runner.storage.size`，或用 `enabled: false` 讓某個 host 停跑但保留 volume
 

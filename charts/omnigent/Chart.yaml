@@ -9,8 +9,9 @@ description: |
   cert.
 
   No credentials ship with the chart: secrets.create is false by default and
-  the workloads read existing Secrets. Version stays at 0.1.0 on purpose -
-  helm.sh/chart is a pod-template label here, so bumping it rolls every pod.
+  the workloads read existing Secrets. Version remains at 0.1.0 for this
+  hardening phase; version labels are object metadata only, so later chart
+  version bumps do not roll every pod.
 
   Sibling of Woow_podman_omnigent_package — same runner image, same auto-claim
   admin flow, same pi harness bundling. The podman sibling mounts a shared
