@@ -1,0 +1,16 @@
+omnigent {{ .Chart.AppVersion }} — release {{ .Release.Name }} in {{ .Release.Namespace }}
+
+Entrance: Service {{ include "omnigent.fullname" . }}:{{ .Values.service.port }} (platform tunnel).
+{{- with .Values.server.baseUrl }}
+Public URL: {{ . }}
+{{- end }}
+
+Login: username "{{ .Values.admin.username }}" with the INITIAL password the
+platform showed once at creation. Change it inside omnigent (Settings) — the
+platform does not reset it. Invite teammates from omnigent's Users page.
+
+{{- if .Values.runner.enabled }}
+
+Runners: each managed session starts an on-demand Job in {{ .Release.Namespace }}
+(image {{ .Values.runner.image }}); idle runners drain after {{ .Values.runner.keepWarmSeconds }}s.
+{{- end }}

@@ -1,0 +1,74 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /* Selects the SERVER pod only. Runner Pods are created by the server's
+       launcher with its own labels (app.kubernetes.io/managed-by: omnigent,
+       omnigent.ai/role: sandbox-host) and stay under the operator baseline
+       (default-deny ingress; they only dial out). Runner → server traffic is
+       same-namespace ingress, allowed by the baseline allow-same-ns. */ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omnigent.fullname" . }}-default-deny
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "omnigent.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omnigent.fullname" . }}-allow
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "omnigent.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    {{- with .Values.networkPolicy.ingressNamespaces }}
+    - ports:
+        - protocol: TCP
+          port: {{ $.Values.service.targetPort }}
+      from:
+        {{- range . }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+    {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    {{- if .Values.networkPolicy.allowAllEgress }}
+    - {}
+    {{- else }}
+    {{- if .Values.runner.enabled }}
+    # kube-apiserver (runner Job launcher).
+    {{- range .Values.networkPolicy.apiserverCidrs }}
+    - to:
+        - ipBlock:
+            cidr: {{ . }}
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 6443}
+    {{- end }}
+    {{- end }}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+      ports:
+        - {protocol: TCP, port: 443}
+        - {protocol: TCP, port: 80}
+    {{- end }}
+{{- end }}

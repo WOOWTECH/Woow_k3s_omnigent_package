@@ -1,0 +1,38 @@
+{{- if .Values.runner.enabled }}
+{{- if not (regexMatch "@sha256:[0-9a-f]{64}$" (.Values.runner.image | toString)) }}
+{{- if not (regexMatch "^jcr-prod\\.woowtech\\.io/.+:[^:@]+$" (.Values.runner.image | toString)) }}
+{{- fail (printf "runner.image %q must be a jcr-prod tag or a tag@sha256 pin" .Values.runner.image) }}
+{{- end }}
+{{- end }}
+# The server's `sandbox:` section (read from OMNIGENT_CONFIG). Mounted by the
+# server Deployment; a checksum annotation restarts the server on change.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "omnigent.configMapName" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    sandbox:
+      provider: kubernetes
+      server_url: {{ include "omnigent.internalUrl" . }}
+      keep_warm_s: {{ .Values.runner.keepWarmSeconds | int }}
+      # Sweep hosts that stay offline (e.g. a runner Pod that was evicted).
+      reaper:
+        enabled: true
+      kubernetes:
+        namespace: {{ .Release.Namespace }}
+        secret_name: {{ include "omnigent.runnerEnvSecretName" . }}
+        service_account: {{ include "omnigent.runnerServiceAccountName" . }}
+        image: {{ .Values.runner.image | quote }}
+        in_cluster: true
+        pod_ready_timeout_s: {{ .Values.runner.podReadyTimeoutSeconds | int }}
+        home_size_limit: {{ .Values.runner.homeSizeLimit | quote }}
+        {{- with .Values.runner.nodeSelector }}
+        node_selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          {{- toYaml .Values.runner.resources | nindent 10 }}
+{{- end }}

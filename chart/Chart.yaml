@@ -1,0 +1,36 @@
+apiVersion: v2
+name: omnigent
+description: |
+  Omnigent (omnigent-ai/omnigent) cloud service chart.
+
+  A per-tenant agent control plane: the omnigent server (web UI + API, port
+  8000) on one RWO volume (SQLite + artifacts + minted state), reached directly
+  through the platform Cloudflare tunnel. NO auth-proxy: omnigent ships its own
+  accounts login, and the first admin is created AT BOOT from the
+  platform-supplied initial password (OMNIGENT_ACCOUNTS_INIT_ADMIN_*), so the
+  unauthenticated POST /auth/setup window never exists on the public URL.
+
+  Runners are upstream's kubernetes managed-sandbox hosts: each managed session
+  gets an on-demand batch/v1 Job (omnigent-host image, non-root uid 1000660000)
+  that dials back to the server with a per-launch token delivered through a
+  per-Job Secret — no runner ever holds the admin password, so the tenant can
+  change it inside omnigent freely. The server's ServiceAccount is bound to a
+  namespaced Role (jobs / pods / per-Job token Secrets) in the tenant namespace.
+
+  Derived from WOOWTECH/Woow_k3s_omnigent_package (single-instance, Postgres,
+  cloudflared, password-sharing runner Deployments) and re-cut to the PaaS
+  contract: release-prefixed names, SQLite instead of Postgres+pgbouncer, no
+  cloudflared, non-root, default-deny NetworkPolicy.
+  Deployed per-tenant by paas-operator as svc-{ref[:8]} into a paas-ws-* namespace.
+type: application
+# 0.1.0 = first cut (omnigent v0.16.0).
+version: 0.1.0
+appVersion: "0.16.0"
+keywords: [paas, omnigent, coding-agent, agent-harness, cloud-service]
+maintainers:
+  - name: WOOW PaaS Team
+home: https://git-prod.woowtech.io/woow-paas/woow-paas-charts
+sources:
+  - https://git-prod.woowtech.io/woow-paas/woow-paas-charts
+  - https://github.com/omnigent-ai/omnigent
+  - https://github.com/WOOWTECH/Woow_k3s_omnigent_package
