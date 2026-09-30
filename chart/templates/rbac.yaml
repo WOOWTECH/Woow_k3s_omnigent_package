@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "omnigent.serverServiceAccountName" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+# The server needs its token only when it launches runner Jobs.
+automountServiceAccountToken: {{ .Values.runner.enabled }}
+{{- if .Values.runner.enabled }}
+---
+# Runner Pods run as this deliberately powerless SA; it only carries the
+# registry pull secret so the launcher's Jobs (which set no imagePullSecrets)
+# can pull the jcr-prod host image.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "omnigent.runnerServiceAccountName" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+    app.kubernetes.io/component: runner
+automountServiceAccountToken: false
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+# Upstream deploy/kubernetes/overlays/sandbox-runners/role.yaml, minus the
+# agent-sandbox CRD rule (not installed) — exactly what the entrypoint-as-host
+# launcher calls. NO pods/exec, NO secrets get/list, NO deployments. The grant is
+# namespace-wide because Kubernetes RBAC cannot scope create/list by label:
+# the server can delete other pods of this workspace. Same trust boundary as
+# the open-design console (one tenant per namespace).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "omnigent.fullname" . }}-sandbox-manager
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "list", "get", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "omnigent.fullname" . }}-sandbox-manager
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "omnigent.fullname" . }}-sandbox-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "omnigent.serverServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

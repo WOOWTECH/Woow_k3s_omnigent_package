@@ -1,0 +1,164 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omnigent.fullname" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # RWO PVC + single-writer SQLite → Recreate.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "omnigent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "omnigent.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.runner.enabled }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "omnigent.serverServiceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.runner.enabled }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: server
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.server.port | quote }}
+            - name: HOST
+              value: "0.0.0.0"
+            # Writable HOME on the volume (the image's HOME is / for uid 1000).
+            - name: HOME
+              value: /data/home
+            - name: DATABASE_URL
+              value: "sqlite:////data/omnigent.db"
+            - name: ARTIFACT_DIR
+              value: /data/artifacts
+            - name: OMNIGENT_AUTH_PROVIDER
+              value: accounts
+            {{- with .Values.server.baseUrl }}
+            - name: OMNIGENT_ACCOUNTS_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.server.sessionTtlHours }}
+            - name: OMNIGENT_ACCOUNTS_SESSION_TTL_HOURS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.server.features }}
+            - name: OMNIGENT_FEATURES
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OMNIGENT_GRANT_MAX_LIFETIME_DAYS
+              value: {{ .Values.server.grantMaxLifetimeDays | int | quote }}
+            - name: OMNIGENT_PUBLIC_SHARING
+              value: {{ ternary "1" "0" .Values.server.publicSharing | quote }}
+            # First-boot admin (ignored once any account exists). Creating it at
+            # boot closes the unauthenticated POST /auth/setup window.
+            - name: OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigent.secretName" . }}
+                  key: admin_username
+                  optional: true
+            - name: OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigent.secretName" . }}
+                  key: admin_password
+            - name: OMNIGENT_ACCOUNTS_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omnigent.secretName" . }}
+                  key: cookie_secret
+            {{- if .Values.runner.enabled }}
+            - name: OMNIGENT_CONFIG
+              value: /etc/omnigent/config.yaml
+            {{- end }}
+            {{- with .Values.server.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # /health, never /healthz (the SPA catch-all answers 200 to anything).
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.runner.enabled }}
+            - name: config
+              mountPath: /etc/omnigent
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "omnigent.pvcName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.runner.enabled }}
+        - name: config
+          configMap:
+            name: {{ include "omnigent.configMapName" . }}
+        {{- end }}

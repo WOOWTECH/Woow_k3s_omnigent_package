@@ -1,0 +1,147 @@
+# ── Server image (platform helm_default_values pins tag@sha256) ───────────────
+# jcr-prod mirror of ghcr.io/omnigent-ai/omnigent-server-kubernetes (the server
+# build that carries the `kubernetes` extra the managed-sandbox launcher needs).
+image:
+  repository: jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes
+  # paas-odoo-ci mirror-image.yml (digest preserved from ghcr v0.16.0).
+  # The platform overrides it with the same pin from the template seed.
+  tag: "20260929.1400@sha256:ba384bba57cb1f80b28e3cbfab7c58d6ad94f5cd99c3773a86a1987ffe3bf902"
+  pullPolicy: IfNotPresent
+# operator forwards the tenant-ns pull secret (paas-registry).
+imagePullSecrets:
+  - name: paas-registry
+# per-instance, single replica (RWO PVC + Recreate; SQLite is single-writer).
+replicaCount: 1
+
+# ── Server ────────────────────────────────────────────────────────────────────
+server:
+  port: 8000
+  # Public https URL of this service. Injected by the platform (it alone knows
+  # the tenant host); https makes omnigent use the __Host- cookie prefix.
+  # "" → omnigent auto-detects (bind address) — fine for local renders only.
+  baseUrl: ""
+  # Comma-separated release features (upstream OMNIGENT_FEATURES).
+  features: ""
+  # Public (link-only) sharing of sessions. Upstream default is ON; a PaaS
+  # tenant URL is public, so it stays off unless the tenant opts in.
+  publicSharing: false
+  # Session JWT lifetime for accounts login (hours; "" = upstream default 8h).
+  sessionTtlHours: ""
+  # Max lifetime (days) of a login refresh grant — what a paired host (e.g. a
+  # PaaS pi-agent linked to this omnigent) renews its access token with.
+  # Upstream default is 30, after which the host drops offline until someone
+  # re-pairs it. Unlinking revokes the grant, so a long ceiling is safe.
+  grantMaxLifetimeDays: 365
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+# ── Tenant credential (platform has_admin_gui supply chain) ───────────────────
+# The platform supplies the INITIAL admin password only: omnigent creates the
+# admin from it on first boot (empty DB) and ignores it afterwards — the tenant
+# changes it inside omnigent. Username is fixed (omnigent has no rename API).
+admin:
+  username: "admin"
+config:
+  sensitive:
+    # "" → self-generated once and persisted via `lookup`.
+    admin_password: ""
+auth:
+  # CD/operator-provided Secret carrying keys admin_password + cookie_secret →
+  # chart renders no Secret.
+  existingSecret: ""
+
+# ── Managed-sandbox runners (upstream `sandbox.provider: kubernetes`) ─────────
+runner:
+  enabled: true
+  # jcr-prod mirror of ghcr.io/omnigent-ai/omnigent-host (claude / codex / pi …).
+  # MUST be a digest pin: the launcher writes it verbatim into every runner Job.
+  # paas-odoo-ci mirror-image.yml #159 (digest preserved from ghcr v0.16.0).
+  image: "jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20260929.1400@sha256:558fce8ab8fe4b577787b523ebffccf970f56d2f99da7bfa9af9959a50ea04f9"
+  # Per-runner-Pod sizing. Every runner counts against the workspace
+  # ResourceQuota, which is what bounds how many sessions can run at once:
+  # the T1 plan (4 vCPU / 8 GiB) = server 1 CPU / 1 GiB + two runners.
+  resources:
+    requests: {cpu: "500m", memory: "1Gi"}
+    limits: {cpu: "1500m", memory: "3Gi"}
+  # sizeLimit of the runner's writable HOME emptyDir.
+  homeSizeLimit: 8Gi
+  # Pod-start wait budget (s). The host image is large; a node without it
+  # cached needs time to pull it.
+  podReadyTimeoutSeconds: 600
+  # Seconds an idle runner stays warm before it drains (upstream keep_warm_s).
+  keepWarmSeconds: 86400
+  # Extra node labels for runner Pods (upstream default: kubernetes.io/arch=amd64).
+  nodeSelector: {}
+  # Extra keys (e.g. ANTHROPIC_API_KEY) projected into every runner via envFrom.
+  # Keys already present on the live Secret are kept across upgrades.
+  env: {}
+
+# ── Service (ClusterIP-only; the tunnel entrance) ─────────────────────────────
+service:
+  type: ClusterIP
+  port: 8000
+  targetPort: 8000
+
+# ── Persistence (RWO PVC at /data: SQLite DB, artifacts, cookie secret, admins) ─
+persistence:
+  enabled: true
+  size: 10Gi           # keep == CloudAppTemplate min_storage_gb (quota lockstep)
+  accessModes: [ReadWriteOnce]
+  storageClass: ""     # platform-injected; "" = cluster default
+  existingClaim: ""
+
+# ── NetworkPolicy ─────────────────────────────────────────────────────────────
+networkPolicy:
+  enabled: true
+  ingressNamespaces: []   # empty = operator-baseline-governed (no chart ingress rule)
+  # The server calls model providers / git hosts; runners install packages and
+  # call providers → internet egress stays on. Lateral moves are blocked by the
+  # operator baseline default-deny-ingress on every paas-ws-* pod.
+  allowAllEgress: true
+  # kube-apiserver CIDRs the server must reach to launch runner Jobs
+  # (platform-injected, same family as open-design console egress).
+  apiserverCidrs: []
+
+# ── Pod hardening ─────────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+readinessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+livenessProbe:
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 5
+startupProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 30
+
+terminationGracePeriodSeconds: 30
+nodeSelector:
+  kubernetes.io/arch: amd64
+affinity: {}
+tolerations: []
+podLabels: {}
+podAnnotations: {}
+nameOverride: ""
+fullnameOverride: ""

@@ -1,0 +1,17 @@
+# The ENTRANCE Service: un-suffixed fullname, the release's only Service. The
+# operator routes the tunnel to it (port 8000 is on its known-port list).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "omnigent.fullname" . }}
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "omnigent.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  chart:
+    name: Lint and render the mirrored chart
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.13.3
+      - name: Install yq (mikefarah)
+        run: |
+          set -Eeuo pipefail
+          sudo curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          yq --version
+      - name: helm lint
+        run: helm lint chart
+      - name: Chart tests
+        run: |
+          set -Eeuo pipefail
+          for t in chart/tests/*.sh; do echo "== $t"; bash "$t"; done
+
+  mirror-guard:
+    name: Mirror completeness
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check the mirror layout
+        run: |
+          set -Eeuo pipefail
+          found=0
+          for f in chart/Chart.yaml chart/values.yaml MIRROR.md scripts/sync-from-gitea.sh; do
+            [ -e "$f" ] || { echo "MISSING: $f"; found=1; }
+          done
+          # The single-instance package lives on legacy/k3s-single-instance only.
+          for p in charts values examples tests/e2e; do
+            [ -e "$p" ] && { echo "LEGACY PATH BACK ON MAIN: $p"; found=1; }
+          done
+          grep -q '<!-- BEGIN GENERATED' MIRROR.md || { echo "MIRROR.md lost its generated block"; found=1; }
+          # chart defaults must stay digest-pinned (they equal the platform pins)
+          grep -qE 'omnigent-server-kubernetes' chart/values.yaml || { echo "server image repo changed"; found=1; }
+          grep -qE 'tag: "[0-9]{8}\.[0-9]{4}@sha256:[0-9a-f]{64}"' chart/values.yaml || { echo "server image not digest-pinned"; found=1; }
+          grep -qE 'omnigent-host:[0-9]{8}\.[0-9]{4}@sha256:[0-9a-f]{64}' chart/values.yaml || { echo "runner image not digest-pinned"; found=1; }
+          exit $found
