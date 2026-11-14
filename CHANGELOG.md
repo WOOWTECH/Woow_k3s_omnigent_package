@@ -32,6 +32,7 @@ See [MIRROR.md](MIRROR.md) for the pinned images.
 - Unchanged defaults: public sharing off (`server.publicSharing: false`) and
   refresh grants last up to 365 days (`server.grantMaxLifetimeDays: 365`).
 - README: version line and the `omnigent==` install pin now say 0.21.0.
+- CI: yq is pinned to v4.53.6 (was v4.44.3); the 0.1.19 tests need it.
 
 ## 1.0.0 — 2026-09-30
 
