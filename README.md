@@ -17,7 +17,7 @@ platform. The source of truth is the internal Gitea
 
 | | |
 |---|---|
-| **Version** | omnigent **0.16.0** (chart `0.1.0`) |
+| **Version** | omnigent **0.21.0** (chart `0.1.19`) |
 | **Provisioning** | Pick "Omnigent" in the PaaS marketplace — one instance per tenant |
 | **URL** | Platform-assigned `https://paas-cs-<workspace>-<id>.woowtech.io` |
 | **Login** | **omnigent's own accounts login** (no extra basic-auth prompt). User `admin`; the initial password is shown once at provisioning — change it inside omnigent, the platform cannot reset it later |
@@ -59,7 +59,7 @@ The pi-agent can use the **in-cluster address** (no public hop):
    ```bash
    export HOME=/data/pi-agent/home PATH=/data/pi-agent/home/.local/bin:$PATH
    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=$HOME/.local/bin INSTALLER_NO_MODIFY_PATH=1 sh
-   uv tool install --python 3.12 "omnigent==0.16.0"
+   uv tool install --python 3.12 "omnigent==0.21.0"
    ```
 2. Log in and connect:
    ```bash

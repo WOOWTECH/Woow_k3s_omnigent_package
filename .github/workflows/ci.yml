@@ -21,7 +21,9 @@ jobs:
       - name: Install yq (mikefarah)
         run: |
           set -Eeuo pipefail
-          sudo curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          # The source repo's CI runs the tests with the latest yq. 4.44.3 mis-parses
+          # `select(..) | .x // "<none>"` in the 0.1.19 egress-profile test; 4.53.6 passes all tests.
+          sudo curl -fsSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.53.6/yq_linux_amd64
           sudo chmod +x /usr/local/bin/yq
           yq --version
       - name: helm lint

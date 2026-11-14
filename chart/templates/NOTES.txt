@@ -13,4 +13,16 @@ platform does not reset it. Invite teammates from omnigent's Users page.
 
 Runners: each managed session starts an on-demand Job in {{ .Release.Namespace }}
 (image {{ .Values.runner.image }}); idle runners drain after {{ .Values.runner.keepWarmSeconds }}s.
+A runner's files (/home/omnigent) are TEMPORARY: they are gone when the runner is rebuilt.
+{{- $hc := include "omnigent.hostConfig" . | fromJson }}
+{{- if $hc }}
+Models: managed sessions use {{ keys $hc.providers | sortAlpha | join " + " }}
+{{- if .Values.llmProxy.enabled }} through the LLM key proxy {{ include "omnigent.llmProxy.fullname" . }}
+(runners hold only a proxy token; the keys are in the proxy's Secret).
+{{- else }} (keys in the runner env Secret).
+{{- end }}
+{{- else }}
+Models: NO LLM key set — managed sessions cannot answer until auth.openrouterApiKey
+or auth.anthropicApiKey is filled in (the web UI shows a notice meanwhile).
+{{- end }}
 {{- end }}

@@ -14,14 +14,14 @@ against the Gitea repository instead.
 <!-- BEGIN GENERATED: scripts/sync-from-gitea.sh -->
 | Mirror path | Source repository | Source path | Commit |
 |---|---|---|---|
-| `chart/` | `woow-paas/woow-paas-charts` | `charts/omnigent/` | `2d41c78f5a009666ea6625678c752c042036ae23` |
+| `chart/` | `woow-paas/woow-paas-charts` | `charts/omnigent/` | `50df613d30ff88ab1d82b217282e8dd71a908d37` |
 
 | Image | Pinned reference (chart default = platform pin) |
 |---|---|
-| server | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes:20260929.1400@sha256:ba384bba57cb1f80b28e3cbfab7c58d6ad94f5cd99c3773a86a1987ffe3bf902` |
-| runner (managed sandbox) | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20260929.1400@sha256:558fce8ab8fe4b577787b523ebffccf970f56d2f99da7bfa9af9959a50ea04f9` |
+| server | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes:20261111.0647@sha256:c6b6cab6478f06f6a36e3731cbd619d8d1bea8ece201da6e97c9dea97c38d72e` |
+| runner (managed sandbox) | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20261111.0647@sha256:701101d009847e7dfb2c607314d42a38d171c9c44732c0e2a624177e02ce23bb` |
 
-Chart `0.1.0` / omnigent `0.16.0` — synced 2026-09-30 05:38 UTC.
+Chart `0.1.19` / omnigent `0.21.0` — synced 2026-11-14 13:36 UTC.
 <!-- END GENERATED -->
 
 ## Where each piece comes from

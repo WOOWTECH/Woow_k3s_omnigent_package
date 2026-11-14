@@ -35,4 +35,17 @@ data:
         {{- end }}
         resources:
           {{- toYaml .Values.runner.resources | nindent 10 }}
+      {{- with (include "omnigent.hostConfig" . | fromJson) }}
+      # #1379: tenant LLM providers + per-harness model lists. Keys stay in the
+      # runner env Secret (api_key_ref: env:…); omnigent installs this block as
+      # the runner's ~/.omnigent/config.yaml and binds each managed session to it.
+      host_config:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if .Values.runner.gc.enabled }}
+  # runner-gc sidecar (#1349): adopts this release's runner Jobs under the
+  # runner ServiceAccount so `helm uninstall` garbage-collects them.
+  runner-gc.py: |
+    {{- .Files.Get "files/runner-gc.py" | nindent 4 }}
+  {{- end }}
 {{- end }}

@@ -14,7 +14,7 @@ WOOW PaaS 上 **Omnigent** 雲端服務的**唯讀鏡像**。真正的來源在�
 
 | | |
 |---|---|
-| **版本** | omnigent **0.16.0**（chart `0.1.0`） |
+| **版本** | omnigent **0.21.0**（chart `0.1.19`） |
 | **開通** | 在 PaaS 的應用市集選「Omnigent」，每個租戶一台 |
 | **網址** | 平台自動配發的 `https://paas-cs-<工作區>-<代號>.woowtech.io` |
 | **登入** | **omnigent 自己的帳號登入**（沒有額外的帳密視窗）。帳號 `admin`，初始密碼在開通時顯示一次；登入後請在 omnigent 內修改，平台之後無法代為重設 |
@@ -51,7 +51,7 @@ pi-agent 可以用**內網位址**連（不經公開網路）：
    ```bash
    export HOME=/data/pi-agent/home PATH=/data/pi-agent/home/.local/bin:$PATH
    curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=$HOME/.local/bin INSTALLER_NO_MODIFY_PATH=1 sh
-   uv tool install --python 3.12 "omnigent==0.16.0"
+   uv tool install --python 3.12 "omnigent==0.21.0"
    ```
 2. 登入並連線：
    ```bash
