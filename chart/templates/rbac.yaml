@@ -25,11 +25,25 @@ imagePullSecrets:
 {{- end }}
 ---
 # Upstream deploy/kubernetes/overlays/sandbox-runners/role.yaml, minus the
-# agent-sandbox CRD rule (not installed) — exactly what the entrypoint-as-host
-# launcher calls. NO pods/exec, NO secrets get/list, NO deployments. The grant is
-# namespace-wide because Kubernetes RBAC cannot scope create/list by label:
-# the server can delete other pods of this workspace. Same trust boundary as
-# the open-design console (one tenant per namespace).
+# agent-sandbox CRD rule (not installed) and minus pods:create — exactly what
+# the entrypoint-as-host launcher calls. NO pods/exec, NO pods:create, NO
+# secrets get/list, NO deployments.
+#
+# #1536: pods:create is REMOVED. The v0.16/v0.17 Kubernetes launcher never creates a
+# Pod itself — it creates a Job (batch/v1) and its token Secret; the Pod is made
+# by the Job controller under kube-controller-manager's own SA, not this token.
+# With no Pod Security on the tenant namespace, a leaked server SA token that
+# could create a Pod could create a PRIVILEGED one and escape to the node; it no
+# longer can. (The #1527/#1544 tenant-ns PodSecurity baseline is the other half.)
+# The remaining pods verbs are read-only (list/get for _find_job_pod /
+# _wait_for_pod_running, pods/log for failure tails) plus delete — the launcher's
+# terminate()/_best_effort_delete fall back to delete_namespaced_pod(<job-name>)
+# for a pre-v0.28 bare Pod; the live Job's child Pod (named <job>-<rand>) is
+# reaped by the Foreground-cascade Job delete, not this verb. delete stays because
+# a 403 there would make terminate() report failure on the normal path; its blast
+# radius is one workspace namespace (one tenant), bounded further by PodSecurity.
+# RBAC cannot scope create/list/delete by label, so these stay namespace-wide —
+# same trust boundary as the open-design console (one tenant per namespace).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -40,12 +54,30 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "delete"]
+  {{- if .Values.runner.gc.enabled }}
+  # runner-gc sidecar (#1349): find this release's runner Jobs and add an
+  # ownerReference to the runner SA (patch adds nothing beyond the delete the
+  # server already holds), reading only that one SA's uid. #1536: it also deletes
+  # Jobs older than runner.gc.maxJobAgeSeconds when that is set (the delete verb
+  # above already covers it).
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["list", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    resourceNames: [{{ include "omnigent.runnerServiceAccountName" . | quote }}]
+    verbs: ["get"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["create", "list", "get", "delete"]
+    verbs: ["list", "get", "delete"]
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # create/delete only — the launcher's per-Job token Secrets. The gc sidecar reuses
+  # delete to reap the token of a runner Job that is gone (AI-FIX-OMN-1-1). NEVER
+  # add list/get/watch/patch: each returns Secret data, i.e. a leaked server token
+  # would read every Secret in the workspace namespace.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create", "delete"]

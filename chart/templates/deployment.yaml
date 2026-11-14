@@ -19,9 +19,15 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egressProfile }}
+        paas.woowtech.io/egress-profile: {{ .Values.networkPolicy.egressProfile | quote }}
+        {{- end }}
       annotations:
         {{- if .Values.runner.enabled }}
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.webUi.paasCopy }}
+        checksum/webui: {{ include (print $.Template.BasePath "/configmap-webui.yaml") . | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -50,6 +56,41 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.webUi.paasCopy }}
+      initContainers:
+        # #1358 / #1379: PaaS copy of the web UI (files/paas-webui.py).
+        - name: web-ui
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "/etc/omnigent-webui/paas-webui.py"]
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: DEST
+              value: /ui
+            - name: HOME
+              value: /tmp
+            - name: ADMIN_USERNAME
+              value: {{ include "omnigent.adminUsername" . | quote }}
+            # 0 → runners on but no tenant LLM key: show the "fill in a key" notice.
+            - name: PAAS_LLM_CONFIGURED
+              value: {{ ternary "1" "0" (or (not .Values.runner.enabled) (ne (include "omnigent.hostConfig" .) "{}")) | quote }}
+            # #1451: 1 → notice that a cloud work machine's files are temporary.
+            - name: PAAS_EPHEMERAL_WORKSPACE
+              value: {{ ternary "1" "0" (and .Values.runner.enabled .Values.webUi.ephemeralWorkspaceNotice) | quote }}
+          resources:
+            {{- toYaml .Values.webUi.resources | nindent 12 }}
+          volumeMounts:
+            - name: web-ui
+              mountPath: /ui
+            - name: tmp
+              mountPath: /tmp
+            - name: webui-script
+              mountPath: /etc/omnigent-webui
+              readOnly: true
+      {{- end }}
       containers:
         - name: server
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
@@ -71,7 +112,14 @@ spec:
             - name: HOME
               value: /data/home
             - name: DATABASE_URL
+              {{- with .Values.server.database.existingSecret }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ . | quote }}
+                  key: {{ $.Values.server.database.existingSecretKey | default "DATABASE_URL" | quote }}
+              {{- else }}
               value: "sqlite:////data/omnigent.db"
+              {{- end }}
             - name: ARTIFACT_DIR
               value: /data/artifacts
             - name: OMNIGENT_AUTH_PROVIDER
@@ -84,14 +132,25 @@ spec:
             - name: OMNIGENT_ACCOUNTS_SESSION_TTL_HOURS
               value: {{ . | quote }}
             {{- end }}
-            {{- with .Values.server.features }}
+            {{- /* 0.1.19（#328）：0.21 起 session_orchestration 預設開啟，PaaS 預設附加
+                   -session_orchestration 維持 0.20 的行為；`-name` 一律優先，0.20 也認得。 */}}
+            {{- $features := list }}
+            {{- with .Values.server.features }}{{- $features = append $features (. | toString) }}{{- end }}
+            {{- if not .Values.server.sessionOrchestration }}{{- $features = append $features "-session_orchestration" }}{{- end }}
+            {{- with $features }}
             - name: OMNIGENT_FEATURES
-              value: {{ . | quote }}
+              value: {{ join "," . | quote }}
             {{- end }}
             - name: OMNIGENT_GRANT_MAX_LIFETIME_DAYS
               value: {{ .Values.server.grantMaxLifetimeDays | int | quote }}
             - name: OMNIGENT_PUBLIC_SHARING
               value: {{ ternary "1" "0" .Values.server.publicSharing | quote }}
+            - name: OMNIGENT_PUBLIC_API_DOCS
+              value: {{ ternary "1" "0" .Values.server.publicApiDocs | quote }}
+            # Tenant URLs are HTTPS only behind the platform tunnel. The overlay image
+            # sends HSTS only when this is set.
+            - name: OMNIGENT_PUBLIC_HSTS
+              value: "1"
             # First-boot admin (ignored once any account exists). Creating it at
             # boot closes the unauthenticated POST /auth/setup window.
             - name: OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME
@@ -114,6 +173,18 @@ spec:
             - name: OMNIGENT_CONFIG
               value: /etc/omnigent/config.yaml
             {{- end }}
+            {{- if .Values.webUi.paasCopy }}
+            - name: OMNIGENT_WEB_UI_DIST
+              value: /ui
+            {{- end }}
+            {{- range .Values.server.extraEnv }}
+            {{- if eq .name "OMNIGENT_PUBLIC_HSTS" }}
+            {{- fail "server.extraEnv must not override OMNIGENT_PUBLIC_HSTS" }}
+            {{- end }}
+            {{- if eq .name "OMNIGENT_FEATURES" }}
+            {{- fail "server.extraEnv must not set OMNIGENT_FEATURES; use server.features / server.sessionOrchestration" }}
+            {{- end }}
+            {{- end }}
             {{- with .Values.server.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -123,8 +194,41 @@ spec:
             initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.startupProbe.periodSeconds }}
             failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+          # AI-OMN-005-1 (0.1.10): readiness also needs a real write on /data. With the PVC
+          # full, sign-in answered 500 and the session list 401 while GET /health stayed 200
+          # — the pod stayed Ready and the platform kept showing running. A 4 KiB write +
+          # fsync fails with ENOSPC only when the volume is really full (96 % / 8 MiB left
+          # still passed every write). Readiness only: a restart cannot free the volume.
           readinessProbe:
+            {{- if .Values.readinessProbe.dataWritableCheck }}
+            exec:
+              command:
+                - python3
+                - -c
+                - |
+                  import os, sys, urllib.request
+                  opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                  try:
+                      with opener.open("http://127.0.0.1:%s/health" % os.environ.get("PORT", "{{ .Values.server.port }}"), timeout=3) as r:
+                          r.read(256)
+                  except Exception as e:
+                      print("GET /health failed: %s" % e)
+                      sys.exit(1)
+                  p = "/data/.woow-ready-probe"
+                  try:
+                      fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                      try:
+                          os.write(fd, b"\0" * 4096)
+                          os.fsync(fd)
+                      finally:
+                          os.close(fd)
+                      os.unlink(p)
+                  except OSError as e:
+                      print("the data volume /data is not writable (%s): sign-in and every save fail" % e)
+                      sys.exit(1)
+            {{- else }}
             httpGet: {path: /health, port: http}
+            {{- end }}
             initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
@@ -147,6 +251,52 @@ spec:
               mountPath: /etc/omnigent
               readOnly: true
             {{- end }}
+            {{- if .Values.webUi.paasCopy }}
+            - name: web-ui
+              mountPath: /ui
+              readOnly: true
+            {{- end }}
+        {{- if and .Values.runner.enabled .Values.runner.gc.enabled }}
+        # #1349: ties runner Jobs to the release (see files/runner-gc.py).
+        - name: runner-gc
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "/etc/omnigent/runner-gc.py"]
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RUNNER_SERVICE_ACCOUNT
+              value: {{ include "omnigent.runnerServiceAccountName" . | quote }}
+            - name: INTERVAL_SECONDS
+              value: {{ .Values.runner.gc.intervalSeconds | int | quote }}
+            # #1536: hard age cap for runner Jobs (0 = off; upstream 7-day deadline).
+            - name: MAX_JOB_AGE_SECONDS
+              value: {{ .Values.runner.gc.maxJobAgeSeconds | int | quote }}
+            # AI-FIX-OMN-1-1: reap `<job>-token` Secrets of runner Jobs that are gone.
+            - name: REAP_TOKEN_SECRETS
+              value: {{ ternary "1" "0" (ne .Values.runner.gc.reapTokenSecrets false) | quote }}
+            - name: TOKEN_SECRET_GRACE_SECONDS
+              value: {{ .Values.runner.gc.tokenSecretGraceSeconds | default 120 | int | quote }}
+            # Tracked Job names; the pod's /tmp emptyDir survives a sidecar restart.
+            - name: STATE_FILE
+              value: /tmp/runner-gc-state.json
+            - name: HOME
+              value: /tmp
+          resources:
+            {{- toYaml .Values.runner.gc.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/omnigent
+              readOnly: true
+        {{- end }}
       volumes:
         - name: data
           {{- if .Values.persistence.enabled }}
@@ -156,7 +306,16 @@ spec:
           emptyDir: {}
           {{- end }}
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.server.tmpSizeLimit | default "1Gi" }}
+        {{- if .Values.webUi.paasCopy }}
+        - name: web-ui
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: webui-script
+          configMap:
+            name: {{ include "omnigent.fullname" . }}-webui
+        {{- end }}
         {{- if .Values.runner.enabled }}
         - name: config
           configMap:

@@ -21,11 +21,139 @@ description: |
   cloudflared, password-sharing runner Deployments) and re-cut to the PaaS
   contract: release-prefixed names, SQLite instead of Postgres+pgbouncer, no
   cloudflared, non-root, default-deny NetworkPolicy.
+
+  LLM keys (0.1.3, llmProxy): the tenant's OpenRouter / Anthropic keys stay in
+  a small in-namespace nginx proxy; runners only get a per-release proxy token
+  that is useless outside the namespace.
   Deployed per-tenant by paas-operator as svc-{ref[:8]} into a paas-ws-* namespace.
 type: application
 # 0.1.0 = first cut (omnigent v0.16.0).
-version: 0.1.0
-appVersion: "0.16.0"
+# 0.1.1 = runner-gc sidecar: runner Jobs owned by the runner SA → GC'd on uninstall (#1349).
+# 0.1.2 = tenant LLM keys for managed sessions (auth.openrouterApiKey / anthropicApiKey →
+#         runner env Secret + sandbox.host_config providers and model lists), idle runner
+#         keep-warm 24 h → 4 h, PaaS login copy and a "no LLM key" notice in the web UI (#1379, #1358).
+# 0.1.3 = R8 fixes. #1436: no allow-all egress — server: DNS + kube-apiserver
+#         (apiserverCidrs, else 10.43.0.1:443 + :6443 on RFC 1918) + internet 443/80
+#         minus Pod/Service CIDR, node IPs, metadata, CGNAT; NEW runner policy (the
+#         upstream-built Job pods): DNS + this release's server :8000 + LLM proxy +
+#         internet minus the same ranges. #1449: LLM key proxy (llmProxy.*, nginx
+#         Deployment + headless Service): runners get a per-release proxy token, the
+#         real keys stay in the proxy's Secret. #1434: ephemeral-storage on every
+#         container incl. the runner Jobs (1Gi/10Gi), server /tmp emptyDir capped.
+#         #1460: runner limits 3 vCPU / 6 GiB (one session can use the plan minus
+#         the server). #1451: web UI notice that cloud work machine files are
+#         temporary (webUi.ephemeralWorkspaceNotice).
+# 0.1.4 = server.database.existingSecret (+ existingSecretKey): DATABASE_URL from a
+#         Secret for an external database (default unchanged: SQLite on the PVC),
+#         plus a server egress rule to the in-namespace DB pods/port
+#         (server.database.egress.*) since 0.1.3 no longer allows all egress.
+#         Replaces the duplicate-DATABASE_URL extraEnv workaround.
+# 0.1.6 = security(#1536): drop pods:create from the server SA (it creates Jobs; the
+#         Job controller makes the Pod) — removes the privileged-Pod node-escape vector
+#         with no Pod Security on the tenant ns. pods stays get/list/delete (terminate's
+#         legacy bare-Pod fallback + failure diagnostics; blast radius = one workspace ns,
+#         bounded by #1527 PodSecurity). New runner.gc.maxJobAgeSeconds (default 0 = off):
+#         the gc sidecar enforces a hard age cap SHORTER than upstream's 7-day
+#         activeDeadlineSeconds (which the config rejects as a key) — NOT an idle timer;
+#         keep_warm only drains the inner runner, the host Job holds its quota until
+#         session delete / 7-day deadline / 30-day offline reaper. Real idle-reclaim is
+#         server-side.
+# 0.1.5 = workspace = LAN (woow_paas_platform #1441/#1436): same-namespace egress/ingress on every
+#         port, allowAllEgress no longer renders `- {}`, multicast/240/4 excluded, the
+#         RFC1918 :6443 apiserver fallback removed (platform injects apiserverCidrs).
+# 0.1.7 = omnigent v0.17.0: server + runner image pins only (paas-odoo-ci mirror-image.yml
+#         #263/#264, digests preserved from ghcr v0.17.0). No template change: v0.16.0..v0.17.0
+#         leaves env vars, entrypoint, port, /health, the kubernetes launcher (Job/Secret/Pod
+#         API calls, RBAC) and the accounts auth untouched. One alembic migration
+#         (mm1a2b3c4d5e, CREATE INDEX CONCURRENTLY on agents) runs at boot — it waits for every
+#         older PostgreSQL snapshot, so check pg_stat_activity before upgrading an external-DB
+#         release. OMNIGENT_FEATURES: `customize` was renamed `harness_settings_ui` and an
+#         unknown flag name now fails server start.
+# 0.1.8 = AI-FIX-OMN-3-2: runner Jobs default to node_selector
+#         paas.woowtech.io/tenant-schedulable=true (keeps the server-built runner Pods off
+#         ubuntuserver-59mqj, which the operator's helm-only TENANT_AVOID_NODES cannot reach).
+#         Requires that node label on 31zix / z0v3w / pggrg first.
+# 0.1.9 = #1497 NetworkPolicy start-up window for runner Pods (runner.egressGate, default on):
+#         the runner env Secret carries BASH_ENV + files/runner-egress-gate.py, so both runner
+#         containers (`bash -lc`: workspace-prep's tenant `git clone`, then the host) wait until
+#         the Pod's NetworkPolicy is observed (k8s API refused/timed out twice) before running
+#         anything; marker in the HOME emptyDir → later / nested shells skip it; timeout 60 s →
+#         proceed. Upstream builds the runner Job at runtime (no helm, no pod-template hook), so
+#         paas-operator's post-renderer gate (woow_paas_platform #1778) cannot reach it. Off
+#         without a runner NetworkPolicy. Server config / Job spec unchanged.
+# 0.1.10 = AI-OMN-005-1 (commercial acceptance 2026-10-16): readiness = GET /health AND a 4 KiB
+#         write + fsync on /data (readinessProbe.dataWritableCheck, default on; exec probe with
+#         the server image's python3). With the 10Gi PVC full, POST /auth/login was 500 and GET
+#         /v1/sessions 401 while /health stayed 200 → Ready, platform running, no alert. Now the
+#         pod goes not Ready, which the platform's workload check (woow_paas_platform #1456)
+#         reports. Liveness / startup unchanged (a restart cannot free the volume).
+# 0.1.11 = AI-FIX-OMN-1-1 (commercial acceptance 2026-10-18): runner-gc also reaps orphaned
+#          runner token Secrets. Upstream creates `<job>-token` (no ownerReferences) and deletes
+#          it only from terminate(); a Job removed any other way (ttlSecondsAfterFinished 24 h
+#          after it ends on its own, the runner-SA uninstall cascade, runner.gc.maxJobAgeSeconds,
+#          a terminate() whose Secret delete failed) left the Secret — and its launch token —
+#          behind for good (paas-ws-7a3676a7 had 4). runner-gc remembers this release's runner
+#          Job names (/tmp emptyDir state) and deletes `<name>-token` once the Job has been gone
+#          for runner.gc.tokenSecretGraceSeconds (default 120 s, ≥ 2 ticks: covers resume());
+#          the max-age delete removes the token at once. Uses the existing `secrets: delete`
+#          verb — NO new RBAC (secrets list/get/patch would expose every Secret in the ns).
+#          runner.gc.reapTokenSecrets=false turns it off.
+# 0.1.12 = 商用驗收 egress-all-ports-open（AI-HER-008-2、AI-OD-007-9）: the server and LLM-proxy pods carry
+#         paas.woowtech.io/egress-profile=web (networkPolicy.egressProfile, default "web";
+#         "" or networkPolicy.enabled=false → no label). The platform baseline egress
+#         (paas-baseline-egress, podSelector {}) allows the internet on ANY port and NPs are a
+#         union, so this chart's 443/80 (proxy 443) internet limit had no effect. Once the operator runs with
+#         TENANT_BASELINE_EGRESS_WEB_PROFILE=true (woow_paas_platform #1802), labelled pods move to
+#         paas-baseline-egress-web (same ns + DNS + internet TCP 80/443). Operator flag off → just
+#         a pod label (the pod rolls once on upgrade), no traffic change. Renumbered 0.1.11 → 0.1.12 in the
+#         2026-10-18 bundle (0.1.11 = charts#252 runner-gc token reap; this is charts#247).
+# 0.1.13 = 保留給 charts#256（X-SEC-005-6 public surface，WIP）。
+# 0.1.14 = omnigent v0.17.0 → v0.19.1，server／host 都改釘 WoowTech overlay（上游 v0.19.1
+#          image 只換修補檔：server 保留 MCP tool 失敗的 isError、host 的 MCP proxy tool 清單
+#          與本機 dispatch 授權一致）。paas-odoo-ci mirror-image.yml #414（server）／#410（host），
+#          tag 20261025.1643，digest 與 ghcr overlay 相同。只換 image、不改模板：v0.17.0..v0.19.1
+#          的 env 只有新增、K8s launcher 與 entrypoint 啟動參數不變、登入頁提示原文不變
+#          （paas-webui.py 照舊命中）。新 alembic migration nf12ab34cd56（CREATE INDEX
+#          CONCURRENTLY，純加法）。回滾到 0.1.12 前要先改 DB，否則 0.17 會拒絕啟動：PG 只要
+#          把 alembic_version 改回 mm1a2b3c4d5e（index 可留，再升級是 no-op）；SQLite 還要先
+#          DROP INDEX ix_conversation_metadata_host_id，SQLite 路徑沒有 IF NOT EXISTS，留著 index
+#          下次升級會撞 already exists 而 crash loop。
+# 0.1.15 = OpenCode 在 New Chat 可以選模型（把 10-25 在 201 上的手動熱修併進 overlay）。只換 image、
+#          不改模板：server 的 web UI 讓 OpenCode 有 modelPicker（向 host 要 opencode-native 的
+#          model-options、建 session 時帶 model_override），host 的 _handle_model_options 改由
+#          `opencode models` 回傳模型清單（0.19.1 原本回 unsupported）。WOOWTECH/omnigent
+#          fix/omnigent-v0191-overlay-opencode-picker-20261028；paas-odoo-ci mirror-image.yml
+#          #487（server）／#486（host），tag 20261028.1043，digest 與 ghcr overlay 相同。
+#          DB schema 與 0.1.14 相同，回滾到 0.1.14 不用改 DB。
+# 0.1.16 = 公開面收斂與主機刪除（審查 C1／C2；取代 0.1.13 保留給 charts#256 的那一版）。只換 server
+#          image、不改模板，host image 不變（仍 20261028.1043）。WOOWTECH/omnigent
+#          fix/omnigent-v0191-overlay-hardening-20261029（PR #1）：匿名 /docs、/redoc、/openapi.json
+#          一律 404（OMNIGENT_PUBLIC_API_DOCS=1 才開；/health、/v1/info、/v1/me 不變）；SPA 只對
+#          web/src/App.tsx 的真實路由回殼，其他路徑 404；新增 DELETE /v1/hosts/{id}（擁有者，在線回
+#          409）與主機清單的 created_at／last_seen。paas-odoo-ci mirror-image.yml #507，tag
+#          20261030.0027，digest 與 ghcr overlay 相同。沙盒實測：13 條真實頁面路由與 0.1.15 相同，
+#          pi-omnigent-plugin server-contract（SDK 0.16.0）12 步全過含主機刪除。DB schema 與 0.1.15
+#          相同，回滾到 0.1.15 不用改 DB。
+# 0.1.17 = omnigent v0.19.1 → v0.20.0（WOOWTECH/omnigent PR #2 的 overlay）。OMNIGENT_PUBLIC_API_DOCS 由
+#          server.publicApiDocs 決定（預設 0）；OMNIGENT_PUBLIC_HSTS 固定 1，server.extraEnv 不可蓋掉。
+#          runner-gc 記憶體上限 128Mi → 256Mi：v0.20.0 上會 OOMKilled，v0.19.1 也已用到約 108Mi。
+#          4 個新 alembic migration（scheduled_tasks 擴欄位、conversation metadata 加欄位），回滾到
+#          0.1.16 要靠備份還原或手動處理 alembic_version。取代 charts#256。
+#          server 固定 OAuthlib 4.0.1 安全修補；server／host JCR 鏡像核准單 #596／#597。
+# 0.1.18 = v0.20.0 server gzip opt-out fix for Starlette 1.10 file downloads/previews.
+#          Server image only; host image, templates and database schema unchanged.
+# 0.1.19 = omnigent v0.20.0 → v0.21.0（WOOWTECH/omnigent PR #3，main 3fd8f8dba 的 overlay：0.20 的
+#          7 項原始碼修補重做在 v0.21.0 上，含 0.1.18 的檔案下載 gzip 修正，host 預裝 OpenCode 2.0.32）。
+#          0.21 的 opencode-native 只支援 OpenCode 2.0.x；chart 給的是
+#          omnigent 自己的 sandbox.host_config 綁定（OpenRouter gateway＋default_model＋model_allowlist），
+#          0.21 由 resolve_bound_opencode_gateway 轉成 OpenCode 2.x 的 `providers`
+#          （@opencode/ai/providers/openai-compatible），綁定格式不用改。
+#          新 alembic migration d0a1f879a01d（scheduled_tasks 加 session_mode／session_id 與表級 CHECK、
+#          scheduled_task_runs 加 index），回滾到 0.1.18：PG 照 operator 的 redeploy-runbook 第 7 節
+#          刪掉新物件並把 alembic_version 改回 b2e4f6a8c013；SQLite 只能換回升級前的備份檔。
+#          server／host JCR 鏡像核准單 #672／#671（paas-odoo-ci）。
+version: 0.1.19
+appVersion: "0.21.0"
 keywords: [paas, omnigent, coding-agent, agent-harness, cloud-service]
 maintainers:
   - name: WOOW PaaS Team

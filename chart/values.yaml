@@ -1,11 +1,22 @@
 # ── Server image (platform helm_default_values pins tag@sha256) ───────────────
-# jcr-prod mirror of ghcr.io/omnigent-ai/omnigent-server-kubernetes (the server
-# build that carries the `kubernetes` extra the managed-sandbox launcher needs).
+# jcr-prod mirror of the WoowTech overlay of ghcr.io/omnigent-ai/omnigent-server-kubernetes
+# (the server build that carries the `kubernetes` extra the managed-sandbox launcher needs).
+# 0.1.14 起：上游 v0.19.1 image 只換 MCP isError 修補的一個檔（WOOWTECH/omnigent
+# fix/omnigent-v0191-overlay-20261025），其餘 bytes 與上游 digest 相同。
+# 0.1.15 起：另外換上 OpenCode 可選模型的 web UI（WOOWTECH/omnigent
+# fix/omnigent-v0191-overlay-opencode-picker-20261028）。
+# 0.1.16 起：API 文件預設不公開、擁有者可刪除離線主機（WOOWTECH/omnigent
+# fix/omnigent-v0191-overlay-hardening-20261029，PR #1）。
+# 0.1.17 起：v0.20.0 overlay，包含 HSTS 與 OAuthlib 4.0.1 安全修補。
+# 0.1.18 起：v0.20.0 server 帶檔案下載 gzip 修正。
+# 0.1.19 起：v0.21.0 overlay（WOOWTECH/omnigent PR #3）。
 image:
   repository: jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes
-  # paas-odoo-ci mirror-image.yml (digest preserved from ghcr v0.16.0).
+  # 來源：WOOWTECH/omnigent PR #3 merge 後的 main 3fd8f8dba2202761e68b7330a9407c591b3e3d92，
+  # GitHub Actions run 42973408102 推出的 ghcr.io/woowtech/omnigent-server-kubernetes 候選 image；
+  # paas-odoo-ci mirror run 41748（核准單 #672）保留同一個 digest。
   # The platform overrides it with the same pin from the template seed.
-  tag: "20260929.1400@sha256:ba384bba57cb1f80b28e3cbfab7c58d6ad94f5cd99c3773a86a1987ffe3bf902"
+  tag: "20261111.0647@sha256:c6b6cab6478f06f6a36e3731cbd619d8d1bea8ece201da6e97c9dea97c38d72e"
   pullPolicy: IfNotPresent
 # operator forwards the tenant-ns pull secret (paas-registry).
 imagePullSecrets:
@@ -20,11 +31,22 @@ server:
   # the tenant host); https makes omnigent use the __Host- cookie prefix.
   # "" → omnigent auto-detects (bind address) — fine for local renders only.
   baseUrl: ""
-  # Comma-separated release features (upstream OMNIGENT_FEATURES).
+  # Comma-separated release features (upstream OMNIGENT_FEATURES). Since v0.17.0 an
+  # unknown name fails server start (`customize` was renamed `harness_settings_ui`).
+  # Since v0.19.0 `-name` disables a default-on feature (e.g. `-claude_osc_status`).
   features: ""
+  # 0.1.19（#328）：omnigent 0.21 把 session_orchestration 改成預設開啟（0.20 預設關閉）。開著時
+  # agent 可以用 sys_session_create(placement="managed") 為每個 worker 建一個新的 runner Job；server
+  # 沒有數量／深度上限，Kubernetes 的 runner Job 閒置也不會被回收（最長留 7 天），會吃掉租戶
+  # namespace 的 ResourceQuota。false（預設）＝ chart 在 OMNIGENT_FEATURES 附加
+  # `-session_orchestration`，行為與 0.20 相同；true ＝ 交給上游預設（開啟）。
+  sessionOrchestration: false
   # Public (link-only) sharing of sessions. Upstream default is ON; a PaaS
   # tenant URL is public, so it stays off unless the tenant opts in.
   publicSharing: false
+  # Anonymous /docs, /redoc and /openapi.json. The image hides them by default; the
+  # chart states the same choice so a tenant values file cannot miss it.
+  publicApiDocs: false
   # Session JWT lifetime for accounts login (hours; "" = upstream default 8h).
   sessionTtlHours: ""
   # Max lifetime (days) of a login refresh grant — what a paired host (e.g. a
@@ -32,14 +54,41 @@ server:
   # Upstream default is 30, after which the host drops offline until someone
   # re-pairs it. Unlinking revokes the grant, so a long ceiling is safe.
   grantMaxLifetimeDays: 365
+  # Database. Default: SQLite on the PVC (/data/omnigent.db) — nothing to set.
+  # For an external database (e.g. a PostgreSQL that already holds a migrated
+  # omnigent DB), name a Secret in the release namespace whose key carries the full
+  # SQLAlchemy URL (e.g. postgresql+psycopg://user:pass@host:5432/omnigent). The
+  # chart then reads DATABASE_URL from that Secret instead of rendering the SQLite
+  # value — no duplicate DATABASE_URL in `extraEnv` (k8s keeps the last duplicate
+  # but warns "hides previous definition"). The PVC stays: artifacts, HOME and the
+  # cookie secret still live on it.
+  database:
+    existingSecret: ""
+    existingSecretKey: DATABASE_URL
+    # Server egress to the database while networkPolicy.allowAllEgress is false
+    # (only rendered when existingSecret is set): pods in THIS namespace matching
+    # `podSelector` ({} = any pod of the namespace, i.e. within the tenant) on
+    # `port`. A database outside the namespace needs its own egress rule
+    # (networkPolicy.allowAllEgress or an extra policy).
+    egress:
+      podSelector: {}
+      port: 5432
   extraEnv: []
+  # ephemeral-storage (#1434): the container layer + logs + the /tmp emptyDir
+  # (tmpSizeLimit) and the web UI copy (128Mi) all sit on the node's system disk;
+  # above the limit the kubelet evicts ONLY this pod.
   resources:
     requests:
       cpu: 250m
       memory: 512Mi
+      ephemeral-storage: 256Mi
     limits:
-      cpu: "1"
+      # 950m + runner.gc 50m = the 1 CPU the T1 quota budgets for the server.
+      cpu: 950m
       memory: 1Gi
+      ephemeral-storage: 2Gi
+  # sizeLimit of the server's /tmp emptyDir (was unbounded before 0.1.3).
+  tmpSizeLimit: 1Gi
 
 # ── Tenant credential (platform has_admin_gui supply chain) ───────────────────
 # The platform supplies the INITIAL admin password only: omnigent creates the
@@ -55,32 +104,158 @@ auth:
   # CD/operator-provided Secret carrying keys admin_password + cookie_secret →
   # chart renders no Secret.
   existingSecret: ""
+  # ── Tenant LLM keys (#1379; platform helm_value_specs, type password) ──────
+  # Written ONLY into the runner env Secret (envFrom on every managed runner);
+  # never into the ConfigMap or the server env. Authoritative: filled → set,
+  # cleared → removed from the Secret. A filled key also turns on the matching
+  # `sandbox.host_config` provider + per-harness model list below, so managed
+  # sessions get a model picker instead of a silent "Model name unavailable".
+  # Changing a key affects runners launched afterwards (a warm runner keeps the
+  # env it started with until it drains or its session is deleted).
+  openrouterApiKey: ""
+  anthropicApiKey: ""
+
+# ── Managed-session models (#1379) ────────────────────────────────────────────
+# Comma-separated model IDs offered in the new-session model picker; the first
+# is the default. Only used when the matching key above is filled.
+llm:
+  # OpenRouter IDs. Drive Pi (any model) and, when no Anthropic key is set,
+  # Claude Code (the anthropic/* entries only).
+  openrouterModels: "moonshotai/kimi-k2.6,deepseek/deepseek-v4-flash,anthropic/claude-sonnet-5.5"
+  # Anthropic API IDs. Drive Claude Code (and Pi when no OpenRouter key is set).
+  anthropicModels: "claude-sonnet-5-5,claude-haiku-4-5-20251001"
+
+# ── Web UI copy for PaaS (#1358 / #1379) ──────────────────────────────────────
+# An init container copies the image's built web UI to an emptyDir, rewrites the
+# login-page hints that describe a self-installed omnigent (whoami username,
+# "no credential is auto-generated") into the PaaS flow, and — while runners are
+# enabled but no LLM key is set — adds a dismissible notice telling the tenant
+# where to fill one in. The server then serves that copy (OMNIGENT_WEB_UI_DIST).
+# Patching is best-effort: an upstream wording change just leaves the original.
+webUi:
+  paasCopy: true
+  # #1451: a dismissible notice in the web UI that a cloud work machine's files are
+  # temporary (only when runners are enabled). Wording: files/paas-webui.py.
+  ephemeralWorkspaceNotice: true
+  resources:
+    requests: {cpu: 50m, memory: 64Mi, ephemeral-storage: 64Mi}
+    limits: {cpu: 500m, memory: 256Mi, ephemeral-storage: 512Mi}
 
 # ── Managed-sandbox runners (upstream `sandbox.provider: kubernetes`) ─────────
 runner:
   enabled: true
-  # jcr-prod mirror of ghcr.io/omnigent-ai/omnigent-host (claude / codex / pi …).
+  # jcr-prod mirror of the WoowTech overlay of ghcr.io/omnigent-ai/omnigent-host
+  # (claude / codex / pi …): upstream v0.21.0 with the three runner MCP-proxy files
+  # replaced, plus host/connect.py and harnesses/opencode_native/app_server.py serving
+  # the OpenCode model catalog, and OpenCode 2.0.32 preinstalled.
   # MUST be a digest pin: the launcher writes it verbatim into every runner Job.
-  # paas-odoo-ci mirror-image.yml #159 (digest preserved from ghcr v0.16.0).
-  image: "jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20260929.1400@sha256:558fce8ab8fe4b577787b523ebffccf970f56d2f99da7bfa9af9959a50ea04f9"
-  # Per-runner-Pod sizing. Every runner counts against the workspace
-  # ResourceQuota, which is what bounds how many sessions can run at once:
-  # the T1 plan (4 vCPU / 8 GiB) = server 1 CPU / 1 GiB + two runners.
+  # 來源：同一個 main commit、同一次 run 推出的 ghcr.io/woowtech/omnigent-host 候選 image；
+  # paas-odoo-ci mirror run 41732（核准單 #671）保留同一個 digest。
+  image: "jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20261111.0647@sha256:701101d009847e7dfb2c607314d42a38d171c9c44732c0e2a624177e02ce23bb"
+  # Per-runner-Pod sizing (one runner = one cloud session's work machine).
+  # #1460: the plan is 4 vCPU / 8 GiB = server 1 vCPU / 1 GiB + 3 vCPU / 6 GiB for
+  # the work machines, so ONE session may now use all of that (0.1.2 capped every
+  # session at 1.5 vCPU / 3 GiB, i.e. a single task never got the plan it paid
+  # for). The request stays small: it is what the scheduler and the workspace
+  # ResourceQuota reserve per runner. Several sessions running at once each get
+  # this ceiling and share the node; upstream has no per-service runner cap, so
+  # how many can run at once is bounded by the workspace ResourceQuota
+  # (limits.cpu / limits.memory) — see the chart README note / PR #1460.
+  # ephemeral-storage (#1434): the runner's HOME emptyDir (homeSizeLimit) counts
+  # against this limit too, so limit = homeSizeLimit + 2Gi for /tmp and the
+  # container layer; above it the kubelet evicts ONLY this runner.
   resources:
-    requests: {cpu: "500m", memory: "1Gi"}
-    limits: {cpu: "1500m", memory: "3Gi"}
-  # sizeLimit of the runner's writable HOME emptyDir.
+    requests: {cpu: "500m", memory: "1Gi", ephemeral-storage: "1Gi"}
+    limits: {cpu: "3", memory: "6Gi", ephemeral-storage: "10Gi"}
+  # sizeLimit of the runner's writable HOME emptyDir (/home/omnigent: the session
+  # workspace lives here). #1451: an emptyDir — the files are TEMPORARY: they are
+  # gone when the runner is rebuilt (session resume after an idle drain or a Stop,
+  # the 7-day Job deadline, an eviction or a node restart). The web UI says so
+  # (webUi.ephemeralWorkspaceNotice). Upstream 0.16/0.17 cannot mount a per-session
+  # volume there (pvc_mounts are static, read-only by default and may not cover
+  # /home/omnigent); see the PR for the evaluation.
   homeSizeLimit: 8Gi
   # Pod-start wait budget (s). The host image is large; a node without it
   # cached needs time to pull it.
   podReadyTimeoutSeconds: 600
   # Seconds an idle runner stays warm before it drains (upstream keep_warm_s).
-  keepWarmSeconds: 86400
+  # 4 h (#1379): an idle runner holds 500m / 1 GiB of the workspace quota; a
+  # drained session resumes on a fresh runner (its scratch files are gone).
+  keepWarmSeconds: 14400
   # Extra node labels for runner Pods (upstream default: kubernetes.io/arch=amd64).
-  nodeSelector: {}
-  # Extra keys (e.g. ANTHROPIC_API_KEY) projected into every runner via envFrom.
-  # Keys already present on the live Secret are kept across upgrades.
+  # AI-FIX-OMN-3-2: runner Jobs are created by the server at run time, so the operator's
+  # TENANT_AVOID_NODES nodeAffinity (helm post-renderer) never reaches them, and upstream
+  # sandbox.kubernetes accepts only node_selector (equality) + tolerations — no affinity.
+  # Pin runners to the nodes labelled paas.woowtech.io/tenant-schedulable=true (every
+  # node except ubuntuserver-59mqj, the production-platform/Artifactory node).
+  # PRECONDITION: the label must exist on the worker nodes BEFORE a release renders this
+  # (otherwise every new runner stays Pending until podReadyTimeoutSeconds).
+  # `--set-json runner.nodeSelector=null` drops the pin.
+  nodeSelector:
+    paas.woowtech.io/tenant-schedulable: "true"
+  # Extra keys projected into every runner via envFrom. Keys already present on
+  # the live Secret are kept across upgrades — except OPENROUTER_API_KEY /
+  # ANTHROPIC_API_KEY, which follow auth.*ApiKey (an explicit runner.env entry
+  # still wins).
   env: {}
+  # #1497 NetworkPolicy start-up window. k3s kube-router programs a NEW pod's
+  # policy only after the pod is running, so for its first ~1–3 s egress is
+  # unrestricted (k8s API, kubelet, node SSH, other namespaces). paas-operator
+  # gates helm-rendered pods with a `woow-egress-gate` init container
+  # (post-renderer), but runner Pods are built at RUNTIME by upstream's launcher
+  # (server → Job via the k8s API: no helm, and upstream has no init-container /
+  # pod-template hook). Both runner containers start as `bash -lc …` with envFrom
+  # the runner env Secret, so this puts BASH_ENV + the gate program
+  # (files/runner-egress-gate.py) into that Secret: bash runs the gate before the
+  # workspace-prep script (which `git clone`s tenant-chosen URLs) and before the
+  # host. The gate probes `target` until it is blocked twice in a row (the runner
+  # policy and the platform baseline both deny it), then leaves a marker in the
+  # HOME emptyDir so the host container and every later `bash -c` skip it. On
+  # timeout it logs "policy NOT observed" and proceeds (= the pre-gate behaviour).
+  # Rendered only while networkPolicy.enabled AND networkPolicy.runner.enabled.
+  # Applies to runners launched after the upgrade (a warm runner keeps its env).
+  # BASH_ENV / WOOW_EGRESS_GATE_* are reserved: runner.env may not set them.
+  egressGate:
+    enabled: true
+    timeoutSeconds: 60
+    # host:port that the runner policy denies; "" = $KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT.
+    target: ""
+  # runner-gc sidecar (#1349). Upstream stamps no release label / owner on
+  # runner Jobs (and `sandbox.kubernetes` accepts none), so `helm uninstall`
+  # used to leave them Running for up to activeDeadlineSeconds = 7 days. The
+  # sidecar (same server image — already on the node, has the kubernetes
+  # client) gives every Job running as this release's runner SA an
+  # ownerReference to that SA; uninstall deletes the SA → the cluster GC deletes
+  # the Jobs + Pods. Its cpu limit is carved out of the server's 1 CPU so
+  # server + gc + two runners still fit the T1 quota (4 vCPU / 8 GiB).
+  gc:
+    enabled: true
+    # Adoption cadence: a runner launched less than this before uninstall can
+    # still be missed (then it lives until its 7-day deadline).
+    intervalSeconds: 15
+    # #1536: hard age cap (seconds) on this release's runner Jobs. keepWarmSeconds
+    # above only drains the INNER runner once a session is idle; the host Job keeps
+    # its CPU/RAM request until session delete, its 7-day deadline, or the 30-day
+    # offline reaper (the Kubernetes provider has no idle-stop). Upstream hardcodes
+    # the 7-day activeDeadlineSeconds and rejects a config override, so the gc
+    # sidecar enforces a SHORTER hard cap when this is > 0 — NOT an idle timer: an
+    # active session past the cap is ended too, so keep it above the longest
+    # session a tenant runs. 0 = upstream 7-day behaviour. Real idle-reclaim is
+    # server-side (woow_paas_platform #1536 / #1459 follow-up).
+    maxJobAgeSeconds: 0
+    # AI-FIX-OMN-1-1: delete a runner Job's `<job>-token` Secret once the Job has been
+    # gone this long. Upstream deletes the Secret only from its own terminate(), so a
+    # Job removed any other way (ttlSecondsAfterFinished 24 h after it ends on its own,
+    # the uninstall cascade, maxJobAgeSeconds above, a half-failed terminate) leaked it.
+    # Uses the `secrets: delete` verb the launcher already holds — no new RBAC. The
+    # grace covers resume(), which recreates the Job under the same name at once;
+    # never less than 2 × intervalSeconds.
+    reapTokenSecrets: true
+    tokenSecretGraceSeconds: 120
+    # 0.1.17: about 108 Mi on v0.19.1; past 128 Mi on v0.20.0 (OOMKilled, CrashLoopBackOff).
+    resources:
+      requests: {cpu: 10m, memory: 64Mi, ephemeral-storage: 16Mi}
+      limits: {cpu: 50m, memory: 256Mi, ephemeral-storage: 128Mi}
 
 # ── Service (ClusterIP-only; the tunnel entrance) ─────────────────────────────
 service:
@@ -99,14 +274,82 @@ persistence:
 # ── NetworkPolicy ─────────────────────────────────────────────────────────────
 networkPolicy:
   enabled: true
+  # 商用驗收 egress-all-ports-open（AI-HER-008-2、AI-OD-007-9）：server 與 LLM proxy pod 帶
+  # paas.woowtech.io/egress-profile=<這個值>。平台 baseline（paas-baseline-egress）的公網規則是
+  # 任意埠，NetworkPolicy 是聯集，下面 server 443/80、proxy 443 的公網限制原本無效；operator 開
+  # TENANT_BASELINE_EGRESS_WEB_PROFILE 後，帶 web 的 pod 改由 paas-baseline-egress-web（同 ns＋DNS＋
+  # 公網 TCP 80/443）管，chart 的限制才生效。operator 沒開＝只是多一個 label，行為不變。
+  # 空字串＝不加 label（回到被一般 baseline 選到）。networkPolicy.enabled=false 時也不加。
+  egressProfile: web
   ingressNamespaces: []   # empty = operator-baseline-governed (no chart ingress rule)
-  # The server calls model providers / git hosts; runners install packages and
-  # call providers → internet egress stays on. Lateral moves are blocked by the
-  # operator baseline default-deny-ingress on every paas-ws-* pod.
-  allowAllEgress: true
-  # kube-apiserver CIDRs the server must reach to launch runner Jobs
-  # (platform-injected, same family as open-design console egress).
+  # #1436: no `- {}` (allow-all) egress any more. Server: DNS + kube-apiserver (to
+  # launch runner Jobs) + the internet on 443/80 except the ranges below. Runners
+  # (their own policy, see `runner`): DNS + this release's server (:8000) and LLM
+  # proxy + the internet on any port except the ranges below. allowAllEgress (legacy)
+  # no longer renders the 0.1.2 bare `- {}` (it cancels the platform baseline egress,
+  # NetworkPolicies being a union — #1441); true and false render the same rules.
+  allowAllEgress: false
+  # Workspace = LAN (woow_paas_platform #1441): the server (and the LLM proxy) reach
+  # every pod of this namespace on any port, and every pod of it reaches the server.
+  sameNamespaceEgress: true
+  sameNamespaceIngress: true
+  # Pod CIDR, Service CIDR, node IPs (RFC 1918), link-local / cloud metadata, CGNAT.
+  egressExcludeCidrs:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 169.254.0.0/16
+    - 100.64.0.0/10
+    - 224.0.0.0/4 # multicast (mDNS / SSDP leak across tenants on the node bridge, #1441)
+    - 240.0.0.0/4 # reserved + limited broadcast 255.255.255.255
+  # kube-apiserver CIDRs the server must reach to launch runner Jobs (same family
+  # as the open-design console egress; the platform may inject the exact /32s).
+  # The platform injects them (woow_paas_platform config parameter
+  # woow_paas_platform.apiserver_cidrs: on woow-k3s 10.43.0.1/32 + the control-plane
+  # nodes 192.168.10.21/22/23 /32 — k3s kube-router matches AFTER the kube-proxy DNAT,
+  # so the destination is a node IP:6443). Empty → the kubernetes Service ClusterIP
+  # 10.43.0.1/32 alone (443/6443). Since 0.1.5 there is no ":6443 on every RFC 1918
+  # range" fallback any more (#1441: no private range beyond the apiserver itself).
   apiserverCidrs: []
+  # Runner Pods (upstream-built Jobs, labels app.kubernetes.io/managed-by=omnigent +
+  # omnigent.ai/role=sandbox-host). They run the tenant's and the model's code.
+  runner:
+    enabled: true
+    # Workspace = LAN (woow_paas_platform #1441): every pod in this namespace on any
+    # port (the tenant's other services over their in-cluster addresses). Default on
+    # since 0.1.5. false → only this release's server and LLM proxy.
+    sameNamespaceEgress: true
+
+# ── LLM key proxy (#1449) ─────────────────────────────────────────────────────
+# Runners no longer receive the tenant's real OpenRouter / Anthropic key. A small
+# nginx Deployment in this namespace holds the keys (its own Secret, never mounted
+# into a runner) and adds them to requests it forwards upstream; runners get a
+# random per-release PROXY TOKEN in the same env vars (OPENROUTER_API_KEY /
+# ANTHROPIC_API_KEY) and host_config points the providers at the proxy. The token
+# works only from inside this namespace (ClusterIP-only, headless Service, never
+# routed by the tunnel), so a member who reads it in a session cannot use it
+# elsewhere or after being removed. Changing a key restarts only the proxy, and
+# warm runners use the new key immediately. false = 0.1.2 behaviour (the real key
+# in every runner's env).
+llmProxy:
+  enabled: true
+  port: 8090
+  image:
+    repository: nginxinc/nginx-unprivileged
+    tag: "1.27-alpine"
+    pullPolicy: IfNotPresent
+  # Upstream hosts (https, certificate verified against the image's CA bundle).
+  upstreams:
+    openrouter: openrouter.ai
+    anthropic: api.anthropic.com
+  # Request bodies (prompts with attachments) up to this size.
+  clientMaxBodySize: 32m
+  resources:
+    requests: {cpu: 10m, memory: 32Mi, ephemeral-storage: 16Mi}
+    limits: {cpu: 200m, memory: 64Mi, ephemeral-storage: 128Mi}
+  initResources:
+    requests: {cpu: 10m, memory: 16Mi, ephemeral-storage: 8Mi}
+    limits: {cpu: 100m, memory: 32Mi, ephemeral-storage: 32Mi}
 
 # ── Pod hardening ─────────────────────────────────────────────────────────────
 podSecurityContext:
@@ -122,6 +365,11 @@ securityContext:
     drop: [ALL]
 
 readinessProbe:
+  # AI-OMN-005-1 (0.1.10): Ready = GET /health AND a 4 KiB write + fsync on /data succeeds
+  # (exec probe, python3 of the server image). A full volume makes the pod not Ready — the
+  # platform's workload check (woow_paas_platform #1456) then flags the service and tells
+  # the administrators. false = the old GET /health only.
+  dataWritableCheck: true
   initialDelaySeconds: 10
   periodSeconds: 10
   timeoutSeconds: 5

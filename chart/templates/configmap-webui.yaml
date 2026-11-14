@@ -1,0 +1,13 @@
+{{- if .Values.webUi.paasCopy }}
+# #1358 / #1379: init-container script that adapts the built web UI to PaaS
+# (login hints, "no LLM key" notice). See files/paas-webui.py.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "omnigent.fullname" . }}-webui
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+data:
+  paas-webui.py: |
+    {{- .Files.Get "files/paas-webui.py" | nindent 4 }}
+{{- end }}

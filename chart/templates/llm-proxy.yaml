@@ -1,0 +1,187 @@
+{{- /*
+#1449 LLM key proxy. Runners get a per-release proxy token instead of the tenant's
+OpenRouter / Anthropic key; this nginx holds the real keys and swaps the token for
+the key on the way out. Rendered only when runners are on, the proxy is on and at
+least one key is filled in.
+*/ -}}
+{{- $keys := include "omnigent.llmKeys" . | fromJson -}}
+{{- if and .Values.runner.enabled .Values.llmProxy.enabled (or $keys.OPENROUTER_API_KEY $keys.ANTHROPIC_API_KEY) }}
+{{- $name := include "omnigent.llmProxy.fullname" . -}}
+{{- $up := .Values.llmProxy.upstreams -}}
+{{- range $k, $h := $up }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$" ($h | toString)) }}
+{{- fail (printf "llmProxy.upstreams.%s %q must be a bare host[:port] (https is implied)" $k $h) }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "omnigent.llmProxy.labels" . | nindent 4 }}
+type: Opaque
+# The ONLY place the tenant's keys live (mounted into the proxy's init container,
+# never into a runner). `data` so a cleared key is removed on upgrade.
+data:
+  proxy_token: {{ include "omnigent.llmProxy.token" . | b64enc | quote }}
+  {{- range $k, $v := $keys }}
+  {{- if $v }}
+  {{ $k }}: {{ $v | b64enc | quote }}
+  {{- end }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "omnigent.llmProxy.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "omnigent.llmProxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "omnigent.llmProxy.labels" . | nindent 8 }}
+        {{- if and .Values.networkPolicy.enabled .Values.networkPolicy.egressProfile }}
+        paas.woowtech.io/egress-profile: {{ .Values.networkPolicy.egressProfile | quote }}
+        {{- end }}
+      annotations:
+        # Keys, token or proxy settings change → restart the proxy (only the proxy:
+        # the server and warm runners keep running; runners hold just the token).
+        checksum/config: {{ printf "%s|%s|%s" (toJson $keys) (include "omnigent.llmProxy.token" .) (toJson .Values.llmProxy) | sha256sum }}
+        checksum/conf: {{ include (print $.Template.BasePath "/llm-proxy-configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: render
+          image: "{{ .Values.llmProxy.image.repository }}:{{ .Values.llmProxy.image.tag }}"
+          imagePullPolicy: {{ .Values.llmProxy.image.pullPolicy }}
+          command: ["/bin/sh", "/etc/llm-proxy/render.sh"]
+          env:
+            - name: PROXY_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ $name }}, key: proxy_token}}
+            - name: OPENROUTER_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ $name }}, key: OPENROUTER_API_KEY, optional: true}}
+            - name: ANTHROPIC_API_KEY
+              valueFrom: {secretKeyRef: {name: {{ $name }}, key: ANTHROPIC_API_KEY, optional: true}}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.llmProxy.initResources | nindent 12 }}
+          volumeMounts:
+            - {name: conf, mountPath: /etc/llm-proxy, readOnly: true}
+            - {name: run, mountPath: /run/llm}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: nginx
+          image: "{{ .Values.llmProxy.image.repository }}:{{ .Values.llmProxy.image.tag }}"
+          imagePullPolicy: {{ .Values.llmProxy.image.pullPolicy }}
+          command: ["nginx", "-g", "daemon off;", "-c", "/etc/llm-proxy/nginx.conf"]
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - {name: http, containerPort: {{ .Values.llmProxy.port }}, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.llmProxy.resources | nindent 12 }}
+          volumeMounts:
+            - {name: conf, mountPath: /etc/llm-proxy, readOnly: true}
+            - {name: run, mountPath: /run/llm, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: conf
+          configMap:
+            name: {{ $name }}
+            defaultMode: 0444
+        # The rendered key file lives in RAM only.
+        - name: run
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+---
+# Headless: resolves straight to the proxy pod, and the operator never routes the
+# tenant tunnel to a headless Service (the proxy is not reachable from outside).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "omnigent.llmProxy.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "omnigent.llmProxy.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: http, port: {{ .Values.llmProxy.port }}, targetPort: http, protocol: TCP}
+{{- if .Values.networkPolicy.enabled }}
+---
+# Proxy egress: DNS + the two upstream APIs over https (the internet minus the
+# cluster / private / metadata ranges; NetworkPolicy cannot match host names).
+# Ingress stays under the operator baseline (same namespace only); the token check
+# guards it against the other pods there.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "omnigent.llmProxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "omnigent.llmProxy.selectorLabels" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.egressExcludeCidrs }}
+              - {{ . }}
+              {{- end }}
+      ports:
+        - {protocol: TCP, port: 443}
+    {{- if .Values.networkPolicy.sameNamespaceEgress }}
+    # Workspace = LAN (woow_paas_platform #1441): every pod of this namespace, on
+    # every port (the tenant's other services over their in-cluster addresses).
+    - to:
+        - podSelector: {}
+    {{- end }}
+{{- end }}
+{{- end }}

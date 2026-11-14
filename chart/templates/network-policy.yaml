@@ -3,7 +3,8 @@
        launcher with its own labels (app.kubernetes.io/managed-by: omnigent,
        omnigent.ai/role: sandbox-host) and stay under the operator baseline
        (default-deny ingress; they only dial out). Runner → server traffic is
-       same-namespace ingress, allowed by the baseline allow-same-ns. */ -}}
+       same-namespace ingress, allowed by the baseline allow-same-ns. Runner EGRESS
+       has its own policy below (#1436). */ -}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -41,6 +42,12 @@ spec:
               kubernetes.io/metadata.name: {{ . | quote }}
         {{- end }}
     {{- end }}
+    {{- if .Values.networkPolicy.sameNamespaceIngress }}
+    # Workspace = LAN (woow_paas_platform #1441): every pod of this namespace, on
+    # every port (runners dial back to the server here).
+    - from:
+        - podSelector: {}
+    {{- end }}
   egress:
     - to:
         - namespaceSelector:
@@ -49,26 +56,116 @@ spec:
       ports:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
-    {{- if .Values.networkPolicy.allowAllEgress }}
-    - {}
-    {{- else }}
     {{- if .Values.runner.enabled }}
-    # kube-apiserver (runner Job launcher).
-    {{- range .Values.networkPolicy.apiserverCidrs }}
+    # kube-apiserver (runner Job launcher; Role omnigent-sandbox-manager is bound in
+    # this namespace only). The platform injects networkPolicy.apiserverCidrs (the
+    # kubernetes Service ClusterIP + the control-plane node /32s — k3s kube-router
+    # matches AFTER the kube-proxy DNAT, so the destination is a node IP:6443).
+    # Empty → the ClusterIP alone (cluster-agnostic, CNIs matching before DNAT).
+    # The old fallback (:6443 on every RFC 1918 range) is gone (#1441).
     - to:
+        {{- range (.Values.networkPolicy.apiserverCidrs | default (list "10.43.0.1/32")) }}
         - ipBlock:
             cidr: {{ . }}
+        {{- end }}
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 6443}
     {{- end }}
+    {{- if .Values.server.database.existingSecret }}
+    # External database (server.database.existingSecret): pods of this namespace
+    # matching server.database.egress.podSelector, on its port only.
+    - to:
+        {{- with .Values.server.database.egress.podSelector }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.server.database.egress.port | default 5432 }}}
     {{- end }}
+    # The internet on https/http (model providers, git hosts), never the cluster,
+    # private networks or multicast. allowAllEgress (legacy) no longer renders a
+    # bare `- {}` — it would cancel the platform baseline egress (NetworkPolicies
+    # are a union, #1436 / #1441).
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
-            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10]
+            except:
+              {{- range .Values.networkPolicy.egressExcludeCidrs }}
+              - {{ . }}
+              {{- end }}
       ports:
         - {protocol: TCP, port: 443}
         - {protocol: TCP, port: 80}
+    {{- if .Values.networkPolicy.sameNamespaceEgress }}
+    # Workspace = LAN (woow_paas_platform #1441): every pod of this namespace, on
+    # every port (the tenant's other services over their in-cluster addresses).
+    - to:
+        - podSelector: {}
     {{- end }}
+{{- if and .Values.runner.enabled .Values.networkPolicy.runner.enabled }}
+---
+{{- /* #1436: runner Pods. The upstream launcher builds them (bare Jobs; no release
+       label can be added), so they are selected by the labels it stamps on every
+       managed runner. Egress only: their ingress stays under the operator baseline
+       (default-deny + allow-same-ns = every pod of the workspace). Two omnigent releases
+       in one namespace render two such policies over the same runners — a union, so
+       each runner may reach both releases' servers and proxies, nothing else. */}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omnigent.fullname" . }}-runner-egress
+  labels:
+    {{- include "omnigent.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/managed-by: omnigent
+      omnigent.ai/role: sandbox-host
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # The runner's host dials back to this release's server (sandbox.server_url).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "omnigent.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: server
+      ports:
+        - {protocol: TCP, port: {{ .Values.server.port }}}
+    {{- if .Values.llmProxy.enabled }}
+    # Model calls go through this release's LLM key proxy (#1449).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "omnigent.llmProxy.selectorLabels" . | nindent 14 }}
+      ports:
+        - {protocol: TCP, port: {{ .Values.llmProxy.port }}}
+    {{- end }}
+    {{- if .Values.networkPolicy.runner.sameNamespaceEgress }}
+    # Workspace = LAN (#1441, default since 0.1.5): every pod of this namespace on
+    # every port.
+    - to:
+        - podSelector: {}
+    {{- end }}
+    # The internet on any port (model APIs, package registries, git over https and
+    # ssh), never the cluster or private networks: the tenant's and the model's code
+    # runs here.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              {{- range .Values.networkPolicy.egressExcludeCidrs }}
+              - {{ . }}
+              {{- end }}
+{{- end }}
 {{- end }}
