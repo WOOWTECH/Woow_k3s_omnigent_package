@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased — native MCP chart 0.1.20 (draft)
+
+- Sync chart `0.1.19` → the unpublished `0.1.20` proposal from reviewed
+  canonical commit `184f409f182b95eb0629cb9ca0d7d84c66cac8b3`.
+- Record planned JCR server tag `20261121.1104` with the real producer digest
+  in [MIRROR.md](MIRROR.md); the proposed JCR image and chart are not published.
+- Correct image provenance: the current server and host are WOOW builds based
+  on upstream Omnigent; registry mirroring preserves the candidate's digest.
+- Document the next server's shared portable wheel, source/receipt identities,
+  canonical MCP URL configuration, and fixed-commit chart synchronization.
+- Keep the existing host/CLI pins and regenerate exact chart provenance. Native MCP
+  Draft PRs may be prepared from a reviewed exact canonical feature commit
+  before JCR approval or chart publication. Release/main promotion remains
+  pending human mirror approval, a verified receipt and the published chart.
+
 ## 1.1.0 — 2026-11-14
 
 Resync from `woow-paas/woow-paas-charts` `main` (`50df613d`): chart `0.1.0` →

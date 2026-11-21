@@ -14,7 +14,7 @@ WOOW PaaS 上 **Omnigent** 雲端服務的**唯讀鏡像**。真正的來源在�
 
 | | |
 |---|---|
-| **版本** | omnigent **0.21.0**（chart `0.1.19`） |
+| **版本** | omnigent **0.21.0**（草稿 chart `0.1.20`，尚未發布） |
 | **開通** | 在 PaaS 的應用市集選「Omnigent」，每個租戶一台 |
 | **網址** | 平台自動配發的 `https://paas-cs-<工作區>-<代號>.woowtech.io` |
 | **登入** | **omnigent 自己的帳號登入**（沒有額外的帳密視窗）。帳號 `admin`，初始密碼在開通時顯示一次；登入後請在 omnigent 內修改，平台之後無法代為重設 |
@@ -32,6 +32,38 @@ WOOW PaaS 上 **Omnigent** 雲端服務的**唯讀鏡像**。真正的來源在�
   namespace 內的 jobs／pods／pods/log／secrets（僅 create、delete）／events 權限，沒有
   `pods/exec`、不能讀 Secret
 - 公開分享預設關閉；refresh grant 最長 365 天（讓接上的機器能自動續期）
+
+## 原生 MCP 升級 — 草稿
+
+目前的 `chart/` 是**尚未發布的 0.1.20 提案**，同步自已審查的 canonical
+commit `184f409f182b95eb0629cb9ca0d7d84c66cac8b3`。規劃中的 JCR server
+tag 為 `20261121.1104`，搭配 [MIRROR.md](MIRROR.md) 記錄的真實 producer
+digest。提案中的 JCR image 與 chart 均**尚未發布**，仍待人工 mirror 核可、
+mirror receipt 驗證與 canonical chart 發布。
+
+目標 server image 安裝共用的 WOOW portable wheel：以 Omnigent `0.21.0`
+為基底的 `mcp.1` build。產物 receipt 記錄來源 commit、wheel／UI 雜湊與
+image digest。managed host 沿用既有以 upstream `0.21.0` 為基底的 image pin；
+下方 CLI 安裝版號維持 `omnigent==0.21.0`。
+
+核可升級完成後：
+
+- 管理員在 **Settings → Admin → Omnigent MCP** 管理 profile。建立時驗證所綁
+  帳號的密碼，server 保存可撤銷 token 的 hash；MCP 操作沿用該帳號的權限。
+- client 使用 API 回傳的正式 `connection_url`。這是 bearer 憑證，請保密並
+  避免寫入日誌。
+- `mcp.publicBaseUrl` 透過 `OMNIGENT_MCP_PUBLIC_BASE_URL` 傳入完整的外部
+  HTTPS base，包含部署 prefix。明確設定的值獨立於 `server.baseUrl` 保留，
+  不再附加 UI prefix。
+- 原生 MCP 使用既有 server Service 的 8000 port。
+
+**草稿準備：** 已完成上述精確 canonical feature commit 的同步，可先準備
+供審查的 Draft PR，不必等 JCR 核可或 chart 發布。提案中的 JCR tag 仍須明確
+標示為**尚未發布**，並搭配 canonical 提案記錄的真實 producer digest。
+
+**發版／合入 main：** 必須等人工 JCR mirror 核可、mirror receipt 驗證，以及
+canonical chart 發布。chart 預設值與平台 seed 的 server pin 和保留的 host pin
+必須一致。來源核對步驟見 [MIRROR.md](MIRROR.md#resyncing)。
 
 ## 把自己的機器接上 omnigent
 
@@ -76,8 +108,12 @@ pi-agent 可以用**內網位址**連（不經公開網路）：
 ## 同步
 
 ```bash
-scripts/sync-from-gitea.sh              # woow-paas-charts 的 main
+scripts/sync-from-gitea.sh 184f409f182b95eb0629cb9ca0d7d84c66cac8b3
 ```
+
+草稿可在 mirror 核可及 chart 發布前，從已審查的精確 canonical feature commit
+同步。自動產生的 provenance 記錄實際 chart commit；image receipt 另外記錄
+WOOW server 的原始碼來源與 wheel。上方發版關卡完成前仍維持草稿。
 
 ## 授權
 

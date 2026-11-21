@@ -12,17 +12,26 @@
 # 0.1.19 起：v0.21.0 overlay（WOOWTECH/omnigent PR #3）。
 image:
   repository: jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes
-  # 來源：WOOWTECH/omnigent PR #3 merge 後的 main 3fd8f8dba2202761e68b7330a9407c591b3e3d92，
-  # GitHub Actions run 42973408102 推出的 ghcr.io/woowtech/omnigent-server-kubernetes 候選 image；
-  # paas-odoo-ci mirror run 41748（核准單 #672）保留同一個 digest。
-  # The platform overrides it with the same pin from the template seed.
-  tag: "20261111.0647@sha256:c6b6cab6478f06f6a36e3731cbd619d8d1bea8ece201da6e97c9dea97c38d72e"
+  # DRAFT: source 459340b0d9516fd3ecb4c35a95eb6e17cc3a5340, build run 44896274348.
+  # Native MCP wheel/UI candidate digest is verified at GHCR. This planned JCR
+  # destination is NOT available yet: human phase-2 mirror approval and source/
+  # destination digest equality verification are required before merge/publish.
+  # The platform seed must use the same tag@digest; runner image stays unchanged.
+  tag: "20261121.1104@sha256:ca7d431c241388f7ed7ae4db6b7583bd3952f303a68a53467985d5a1f33539e5"
   pullPolicy: IfNotPresent
 # operator forwards the tenant-ns pull secret (paas-registry).
 imagePullSecrets:
   - name: paas-registry
 # per-instance, single replica (RWO PVC + Recreate; SQLite is single-writer).
 replicaCount: 1
+
+# Native MCP uses the existing server Service and accounts authentication.
+mcp:
+  # Complete external deployment base, including any deployment prefix.
+  # Passed unchanged; never append a web UI / HA Ingress path. HTTPS is required
+  # except for loopback development. No credentials, query or fragment.
+  # Empty delegates to the server's trusted OMNIGENT_ACCOUNTS_BASE_URL fallback.
+  publicBaseUrl: ""
 
 # ── Server ────────────────────────────────────────────────────────────────────
 server:
