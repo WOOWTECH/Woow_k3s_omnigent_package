@@ -152,7 +152,12 @@ type: application
 #          scheduled_task_runs 加 index），回滾到 0.1.18：PG 照 operator 的 redeploy-runbook 第 7 節
 #          刪掉新物件並把 alembic_version 改回 b2e4f6a8c013；SQLite 只能換回升級前的備份檔。
 #          server／host JCR 鏡像核准單 #672／#671（paas-odoo-ci）。
-version: 0.1.19
+# 0.1.20 = native MCP (15 tools, including history) and complete external base URL.
+#          DRAFT source 459340b0, build 44896274348; JCR mirror is pending human
+#          approval and post-copy digest verification. Do not merge/publish yet.
+#          Runner unchanged. New migration head za3b4c5d6e7f: rollback requires
+#          a verified pre-upgrade database/artifact backup, not an image-only reset.
+version: 0.1.20
 appVersion: "0.21.0"
 keywords: [paas, omnigent, coding-agent, agent-harness, cloud-service]
 maintainers:

@@ -7,12 +7,21 @@
 #
 #   chart/    <- woow-paas/woow-paas-charts  charts/omnigent/
 #
-# omnigent ships no WOOW-built image: the server and runner images are the
-# upstream ghcr.io images copied byte-for-byte into jcr-prod (paas-odoo-ci
-# mirror-image.yml), so only the chart is mirrored. The image pins are read
-# from chart/values.yaml into MIRROR.md.
+# WOOWTECH/omnigent builds the server from the upstream Kubernetes base;
+# native MCP uses the shared portable WOOW wheel. The managed host keeps its
+# independently reviewed upstream-based pin. paas-odoo-ci mirror-image.yml
+# copies approved candidates into the registry mirror. Digest preservation
+# refers to that copy, not equality with the upstream base image.
+# Only the chart is synced here; image pins are read from chart/values.yaml
+# into MIRROR.md. The producer receipt separately identifies the server source
+# commit and wheel/UI hashes; CHARTS_SHA below identifies the chart source.
 #
 # Usage:  scripts/sync-from-gitea.sh [woow-paas-charts-ref]   (default "main")
+#
+# Draft sync: pass the reviewed full canonical feature commit before JCR
+# approval or chart publication; keep proposed registry tags marked unpublished.
+# Release/main promotion waits for human mirror approval, a verified mirror
+# receipt and the published chart. This script does not approve or publish images.
 #
 # Needs git read access to the Gitea repo (e.g. a credential helper for
 # https://git-prod.woowtech.io). Writes the resolved commit into MIRROR.md so

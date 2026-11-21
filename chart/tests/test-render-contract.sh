@@ -22,6 +22,23 @@ printf '%s' "$OUT" | grep -qiE 'cloudflared|pgbouncer|postgres|nginx' && fail "c
 # server + the runner-gc sidecar (#1349) only — no auth-proxy
 [ "$(printf '%s' "$DEP" | yq '[.spec.template.spec.containers[].name] | join(",")')" = "server,runner-gc" ] || fail "server pod must be exactly server + runner-gc (no auth-proxy sidecar)"
 
+# Reviewed source digest; this render assertion does not prove JCR availability.
+[ "$(yq '.version' "$CHART_DIR/Chart.yaml")" = "0.1.20" ] || fail "native MCP chart version must be 0.1.20"
+[ "$(printf '%s' "$DEP" | yq '.spec.template.spec.containers[] | select(.name=="server") | .image')" = "jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes:20261121.1104@sha256:ca7d431c241388f7ed7ae4db6b7583bd3952f303a68a53467985d5a1f33539e5" ] || fail "server must use the reviewed Kubernetes candidate digest"
+[ "$(yq '.runner.image' "$CHART_DIR/values.yaml")" = "jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20261111.0647@sha256:701101d009847e7dfb2c607314d42a38d171c9c44732c0e2a624177e02ce23bb" ] || fail "native MCP upgrade must retain the released runner pin"
+
+# Native MCP base is complete and independent of the accounts/UI base.
+[ -z "$(env_of OMNIGENT_MCP_PUBLIC_BASE_URL .value)" ] || fail "unset MCP base must delegate to the server fallback"
+MCP="$($HELM template t "$CHART_DIR" --set-string server.baseUrl=https://ui.example.test --set-string mcp.publicBaseUrl=https://mcp.example.test/deploy/prefix/)"
+MCP_ENV="$(printf '%s' "$MCP" | yq -N 'select(.kind=="Deployment") | .spec.template.spec.containers[] | select(.name=="server") | .env')"
+[ "$(printf '%s' "$MCP_ENV" | yq '.[] | select(.name=="OMNIGENT_MCP_PUBLIC_BASE_URL") | .value')" = "https://mcp.example.test/deploy/prefix/" ] || fail "complete MCP base must be passed unchanged"
+[ "$(printf '%s' "$MCP_ENV" | yq '.[] | select(.name=="OMNIGENT_ACCOUNTS_BASE_URL") | .value')" = "https://ui.example.test" ] || fail "MCP base must not replace accounts base"
+[ "$(printf '%s' "$MCP" | yq -N 'select(.kind=="Service") | .metadata.name' | wc -l)" = "1" ] || fail "native MCP must use the existing Service"
+[ "$($HELM template t "$CHART_DIR" --set runner.enabled=false --set-string mcp.publicBaseUrl=http://localhost:8000/prefix | yq -N 'select(.kind=="Deployment") | .spec.template.spec.containers[0].env[] | select(.name=="OMNIGENT_MCP_PUBLIC_BASE_URL") | .value')" = "http://localhost:8000/prefix" ] || fail "loopback development / disabled runners must preserve the MCP base"
+if $HELM template t "$CHART_DIR" --set-string 'server.extraEnv[0].name=OMNIGENT_MCP_PUBLIC_BASE_URL' --set-string 'server.extraEnv[0].value=https://other.example.test' >/dev/null 2>&1; then
+  fail "MCP base must have one configuration source (mcp.publicBaseUrl)"
+fi
+
 # auth: accounts provider, boot-time admin from the Secret, sharing off
 [ "$(env_of OMNIGENT_AUTH_PROVIDER .value)" = "accounts" ] || fail "OMNIGENT_AUTH_PROVIDER must be accounts"
 [ "$(env_of OMNIGENT_ACCOUNTS_INIT_ADMIN_PASSWORD .valueFrom.secretKeyRef.key)" = "admin_password" ] || fail "INIT_ADMIN_PASSWORD must come from Secret admin_password"
