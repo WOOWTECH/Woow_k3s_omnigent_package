@@ -128,6 +128,10 @@ spec:
             - name: OMNIGENT_ACCOUNTS_BASE_URL
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.mcp.publicBaseUrl }}
+            - name: OMNIGENT_MCP_PUBLIC_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.server.sessionTtlHours }}
             - name: OMNIGENT_ACCOUNTS_SESSION_TTL_HOURS
               value: {{ . | quote }}
@@ -178,6 +182,9 @@ spec:
               value: /ui
             {{- end }}
             {{- range .Values.server.extraEnv }}
+            {{- if eq .name "OMNIGENT_MCP_PUBLIC_BASE_URL" }}
+            {{- fail "server.extraEnv must not set OMNIGENT_MCP_PUBLIC_BASE_URL; use mcp.publicBaseUrl" }}
+            {{- end }}
             {{- if eq .name "OMNIGENT_PUBLIC_HSTS" }}
             {{- fail "server.extraEnv must not override OMNIGENT_PUBLIC_HSTS" }}
             {{- end }}

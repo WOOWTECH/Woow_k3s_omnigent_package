@@ -17,7 +17,7 @@ platform. The source of truth is the internal Gitea
 
 | | |
 |---|---|
-| **Version** | omnigent **0.21.0** (chart `0.1.19`) |
+| **Version** | omnigent **0.21.0** (chart `0.1.20`) |
 | **Provisioning** | Pick "Omnigent" in the PaaS marketplace — one instance per tenant |
 | **URL** | Platform-assigned `https://paas-cs-<workspace>-<id>.woowtech.io` |
 | **Login** | **omnigent's own accounts login** (no extra basic-auth prompt). User `admin`; the initial password is shown once at provisioning — change it inside omnigent, the platform cannot reset it later |
@@ -38,6 +38,38 @@ platform. The source of truth is the internal Gitea
   only) / events in its own namespace — no `pods/exec`, no Secret reads.
 - Public sharing is off by default; refresh grants last up to 365 days so
   connected machines keep renewing.
+
+## Native MCP upgrade
+
+The checked-in `chart/` mirrors published canonical chart `0.1.20` from
+merge commit `d5396c152ef1f415a4726294045bb755f2d5ef47`.
+The approved server mirror tag `20261121.1104` and its preserved producer
+digest were verified before chart publication. See [MIRROR.md](MIRROR.md)
+for the chart OCI digest and separate chart/server source identities.
+Artifact publication does not establish a production deployment.
+
+The server image installs the shared WOOW portable wheel, build
+`mcp.1`, based on Omnigent `0.21.0`. Its receipt identifies the source commit,
+wheel/UI hashes and image digests. The managed host keeps its existing
+upstream-based `0.21.0` image pin; the CLI installation below remains
+`omnigent==0.21.0`.
+
+Native MCP provides:
+
+- Administrators manage profiles in **Settings → Admin → Omnigent MCP**.
+  Creating a profile verifies the linked account's password; the server stores
+  a revocable token hash. MCP operations follow that account's permissions.
+- Clients use the API's canonical `connection_url`. Treat it as a bearer
+  credential and keep it out of logs.
+- `mcp.publicBaseUrl` supplies the complete external HTTPS base, including any
+  deployment prefix, through `OMNIGENT_MCP_PUBLIC_BASE_URL`. An explicit value
+  is preserved independently of `server.baseUrl`; no UI prefix is appended.
+- Native MCP uses the existing server Service on port 8000.
+
+The chart defaults and platform seed must agree on the server pin and
+retained host pin. For subsequent releases, verify human mirror approval,
+the mirror receipt and canonical chart publication before release/main
+promotion. See [MIRROR.md](MIRROR.md#resyncing) for the provenance checks.
 
 ## Connecting your own machine
 
@@ -87,8 +119,13 @@ Notes:
 ## Syncing
 
 ```bash
-scripts/sync-from-gitea.sh              # woow-paas-charts at main
+scripts/sync-from-gitea.sh d5396c152ef1f415a4726294045bb755f2d5ef47
 ```
+
+Sync the exact published canonical commit in both mirrors. The generated
+provenance records the resolved chart commit; the image receipt separately
+identifies the WOOW server source and wheel. Confirm the recorded pins and
+publication receipts before release/main promotion.
 
 ## License
 
