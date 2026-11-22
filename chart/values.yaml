@@ -12,10 +12,10 @@
 # 0.1.19 起：v0.21.0 overlay（WOOWTECH/omnigent PR #3）。
 image:
   repository: jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes
-  # DRAFT: source 459340b0d9516fd3ecb4c35a95eb6e17cc3a5340, build run 44896274348.
-  # Native MCP wheel/UI candidate digest is verified at GHCR. This planned JCR
-  # destination is NOT available yet: human phase-2 mirror approval and source/
-  # destination digest equality verification are required before merge/publish.
+  # Source 459340b0d9516fd3ecb4c35a95eb6e17cc3a5340, build run 44896274348.
+  # Native MCP wheel/UI provenance is bound to this immutable producer digest.
+  # Release requires human phase-2 mirror approval and source/destination
+  # digest equality verification before merge/publish.
   # The platform seed must use the same tag@digest; runner image stays unchanged.
   tag: "20261121.1104@sha256:ca7d431c241388f7ed7ae4db6b7583bd3952f303a68a53467985d5a1f33539e5"
   pullPolicy: IfNotPresent

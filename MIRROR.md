@@ -2,33 +2,31 @@
 
 This repository is a **read-only mirror** of the Omnigent cloud service that
 runs on the WOOW PaaS platform. The source of truth is the internal Gitea
-(`git-prod.woowtech.io`). Draft mirrors can sync a reviewed canonical feature
-commit with [`scripts/sync-from-gitea.sh`](scripts/sync-from-gitea.sh) before
-publication. Release/main promotion retains the source review and production
-approval gates described below.
+(`git-prod.woowtech.io`). Sync the exact canonical chart commit with
+[`scripts/sync-from-gitea.sh`](scripts/sync-from-gitea.sh). Source review,
+artifact publication and deployment approval remain separate gates.
 
 **Do not edit `chart/` here** — the next sync overwrites it. Open the change
 against the Gitea repository instead.
 
 ## Current sync
 
-**Draft / not published:** this is the reviewed chart `0.1.20` proposal.
-The server reference below combines planned JCR tag `20261121.1104` with the
-real producer digest; it does not establish JCR availability. Human mirror
-approval, a verified mirror receipt and canonical chart publication remain
-pending. The managed host keeps its existing pin.
+**Published chart `0.1.20`:** the canonical chart publication and approved
+server mirror have been verified. The generated record below identifies the
+exact canonical chart commit and image pins. Artifact publication does not
+establish a production deployment. The managed host keeps its existing pin.
 
 <!-- BEGIN GENERATED: scripts/sync-from-gitea.sh -->
 | Mirror path | Source repository | Source path | Commit |
 |---|---|---|---|
-| `chart/` | `woow-paas/woow-paas-charts` | `charts/omnigent/` | `184f409f182b95eb0629cb9ca0d7d84c66cac8b3` |
+| `chart/` | `woow-paas/woow-paas-charts` | `charts/omnigent/` | `d5396c152ef1f415a4726294045bb755f2d5ef47` |
 
 | Image | Pinned reference (chart default = platform pin) |
 |---|---|
 | server | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-server-kubernetes:20261121.1104@sha256:ca7d431c241388f7ed7ae4db6b7583bd3952f303a68a53467985d5a1f33539e5` |
 | runner (managed sandbox) | `jcr-prod.woowtech.io/woow-paas-docker-local/omnigent-host:20261111.0647@sha256:701101d009847e7dfb2c607314d42a38d171c9c44732c0e2a624177e02ce23bb` |
 
-Chart `0.1.20` / omnigent `0.21.0` — synced 2026-11-21 11:27 UTC.
+Chart `0.1.20` / omnigent `0.21.0` — synced 2026-11-22 01:45 UTC.
 <!-- END GENERATED -->
 
 ## Where each piece comes from
@@ -43,16 +41,21 @@ These are WOOW builds of upstream Omnigent. Digest preservation applies when
 copying the approved candidate into the registry mirror; it does not mean the
 WOOW candidate has the same digest as its upstream base.
 
-## Native MCP provenance — draft
+## Native MCP provenance
 
-The generated record above is the current draft sync from reviewed canonical
-feature commit `184f409f182b95eb0629cb9ca0d7d84c66cac8b3`. It advances the
-chart from `0.1.19` to the unpublished `0.1.20` proposal and records the
-planned JCR server tag `20261121.1104` with the actual producer digest.
+Chart `0.1.20` was published from canonical merge commit
+`d5396c152ef1f415a4726294045bb755f2d5ef47`.
+Its OCI digest is `sha256:8f0eba407664e6fe90bb1dc475169c8449a85bee414139d3b52860b87a398cd3`.
+Publication CI run `47399` passed. The Gitea Helm and OCI chart archives were
+verified byte-for-byte; their TGZ SHA-256 is
+`5547b9230f7a81e0265d0d712ca2ae20fda311d361fa78bce0ff1019ee5f1ff9`.
+The approved server mirror was verified by mirror CI run `47183`; its tag
+`20261121.1104` preserves the producer image digest recorded above.
 The producer source is `459340b0d9516fd3ecb4c35a95eb6e17cc3a5340`
-(CI run `44896274348-1`). This draft sync does not publish the image or chart.
+(CI run `44896274348-1`). Chart and image publication were independently
+verified before this mirror's release promotion.
 
-The proposed server build uses the shared portable WOOW wheel (`mcp.1`, upstream
+The server build uses the shared portable WOOW wheel (`mcp.1`, upstream
 package version `0.21.0`). The Kubernetes server image installs that wheel on
 the corresponding upstream base. Keep the producer's `candidate-image.json`
 and the image's `/opt/woow-artifact/WOOW_BUILD_RECEIPT.json` plus
@@ -71,15 +74,11 @@ There are two separate source identities:
 - **Server source commit:** the `WOOWTECH/omnigent` commit in the producer
   receipt, carried with the wheel and candidate image.
 
-Draft sync and Draft PR preparation may proceed from a reviewed full canonical
-feature commit before human JCR approval or chart publication. Copy the actual
-proposal, including its real producer digest and planned JCR tag, and clearly
-mark that registry reference and chart proposal as **not published**.
-
-Release/main promotion must wait for human JCR mirror approval, the verified
-mirror receipt and canonical chart publication. For release evidence, do not
-substitute a candidate tag, source-tree hash, or proposed chart version for
-the approved image digest or published chart.
+For subsequent releases, verify human mirror approval, the mirror receipt
+and canonical chart publication before release/main promotion. Record the
+reviewed chart commit separately from the server source and compare the
+published image and chart digests with their receipts. A candidate tag,
+source-tree hash or proposed version is not evidence of publication.
 
 ## How the PaaS platform uses it
 
@@ -101,12 +100,10 @@ the approved image digest or published chart.
 
 ## Resyncing
 
-For a reviewable native MCP draft, use the supplied reviewed full canonical
-feature commit in both mirrors. This can happen before JCR mirror approval or
-chart publication:
+Use the exact published canonical chart commit recorded above in both mirrors:
 
 ```bash
-scripts/sync-from-gitea.sh 184f409f182b95eb0629cb9ca0d7d84c66cac8b3
+scripts/sync-from-gitea.sh d5396c152ef1f415a4726294045bb755f2d5ef47
 ```
 
 Needs read access to the Gitea repository. The script also accepts branch/tag
@@ -114,15 +111,15 @@ refs and defaults to `main`; draft and release syncs use the reviewed exact comm
 It copies `chart/` and updates only the generated block above; it does not
 build images, approve a mirror, or publish a chart.
 
-After draft sync, update the README version/current-chart wording to describe
-the actual proposal and retain its **draft / not published** status. Review
-the generated commit and pins against the producer receipt, run the mirrored
-chart's CI checks, and keep both mirrors aligned.
+Compare the generated commit and pins with the verified mirror and chart
+receipts, run the mirrored chart's scoped CI checks, and keep both mirrors
+aligned. Update the README version and provenance to match the verified
+publication status.
 
-Before release/main promotion, verify the approved mirror receipt and published
-chart, and confirm the chart defaults and platform template seed agree on the
-chart version, server image digest and retained host pin. A completed draft
-sync does not authorize publication or a production deployment.
+Before release/main promotion, confirm that the chart defaults and platform
+template seed agree on the chart version, server image digest and retained
+host pin. Syncing or publishing artifacts does not authorize a production
+deployment.
 
 ## History
 
